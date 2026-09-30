@@ -732,11 +732,14 @@ dependencies = [
  "clap",
  "dasp_sample",
  "env_logger",
+ "futures-util",
  "log",
  "parking_lot",
  "sendspin",
+ "serde_json",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

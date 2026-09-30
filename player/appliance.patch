@@ -1,8 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 4e947d5..c77cf7c 100644
+index 4e947d5..2670f4c 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -1,34 +1,21 @@
+@@ -1,34 +1,26 @@
 +# Modified for macbook-sendspin: ALSA-only stateless appliance.
  [package]
  name = "sendspin-rs-cli"
@@ -37,6 +37,11 @@ index 4e947d5..c77cf7c 100644
 -# build. Revisit once cpal bumps its own alsa dependency.
  alsa = "0.11"
 +dasp_sample = "0.11"
++
++[dev-dependencies]
++futures-util = "0.3"
++serde_json = "1.0"
++tokio-tungstenite = "0.29"
  
 -[target.'cfg(not(target_os = "linux"))'.dependencies]
 -cpal = "0.18"
@@ -683,7 +688,7 @@ index 5ae484c..a006cc5 100644
      Alsa(#[from] alsa::Error),
  }
 diff --git a/src/lib.rs b/src/lib.rs
-index 7c76415..1d573bd 100644
+index 7c76415..cd64142 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -1,3 +1,4 @@
@@ -701,7 +706,35 @@ index 7c76415..1d573bd 100644
  pub mod player;
  
  use clap::Parser;
-@@ -53,35 +52,29 @@ async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
+@@ -32,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
+ 
+ use crate::error::SendspinError;
+ 
+-// Routine player-state pushes (volume/mute changes, stream lifecycle events).
++// Routine player-state pushes (volume changes, stream lifecycle events).
+ // `state` is intentionally left `None` here: the top-level ClientState.state
+ // field is reserved for genuine sync-state transitions (see
+ // WsSender::send_sync_state/exit_external_source in the sendspin crate) — the
+@@ -41,47 +40,42 @@ use crate::error::SendspinError;
+ // initial_sync_state/initial_player_state (see build_client). Setting `state`
+ // again on every routine update is what the server flags as "legacy top-level
+ // 'state' field" usage.
+-async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
++fn volume_player_state(volume: u8) -> PlayerState {
++    // Only advertise volume, so muted must be None (omitted on the wire).
++    PlayerState { volume: Some(volume), ..Default::default() }
++}
++
++async fn send_player_state(ws_tx: &WsSender, volume: u8) {
+     let state = Message::ClientState(ClientState {
+         state: None,
+-        player: Some(PlayerState {
+-            volume: Some(volume),
+-            muted: Some(muted),
+-            ..Default::default()
+-        }),
++        player: Some(volume_player_state(volume)),
+     });
      let _ = ws_tx.send_message(state).await;
  }
  
@@ -752,7 +785,7 @@ index 7c76415..1d573bd 100644
  struct ResolvedConfig {
      name: String,
      client_id: String,
-@@ -91,96 +84,41 @@ struct ResolvedConfig {
+@@ -91,96 +85,41 @@ struct ResolvedConfig {
  }
  
  fn resolve_config(args: &Args) -> ResolvedConfig {
@@ -856,7 +889,7 @@ index 7c76415..1d573bd 100644
 +fn validate_host(host: &str) -> Result<(), String> {
 +    if host.parse::<std::net::IpAddr>().is_ok() {
 +        return Ok(());
-     }
++    }
 +    if host.is_empty() || host.len() > 253 || !host.split('.').all(|label| {
 +        !label.is_empty() && label.len() <= 63
 +            && label.as_bytes()[0].is_ascii_alphanumeric()
@@ -864,7 +897,7 @@ index 7c76415..1d573bd 100644
 +            && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
 +    }) {
 +        return Err("server must be an explicit hostname or IP address".into());
-+    }
+     }
 +    Ok(())
 +}
 +
@@ -882,7 +915,7 @@ index 7c76415..1d573bd 100644
  }
  
  /// Mutable stream state that resets on each connection
-@@ -209,6 +147,10 @@ impl StreamState {
+@@ -209,6 +148,10 @@ impl StreamState {
      }
  }
  
@@ -893,7 +926,7 @@ index 7c76415..1d573bd 100644
  async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream: &mut StreamState) {
      match &msg {
          Message::StreamStart(_) => info!("← SERVER: stream/start"),
-@@ -227,8 +169,10 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+@@ -227,8 +170,10 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
                  let channels = player_config.channels;
                  let bit_depth = player_config.bit_depth;
  
@@ -906,7 +939,30 @@ index 7c76415..1d573bd 100644
                      return;
                  }
  
-@@ -273,9 +217,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+@@ -249,19 +194,19 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+                 stream.next_play_time = None;
+ 
+                 info!("Stream: {}Hz {}ch {}bit", sample_rate, channels, bit_depth);
+-                send_player_state(ws_tx, player.volume(), false).await;
++                send_player_state(ws_tx, player.volume()).await;
+             }
+         }
+         Message::StreamEnd(_) => {
+             info!("← stream/end");
+             player.stop();
+             stream.next_play_time = None;
+-            send_player_state(ws_tx, player.volume(), false).await;
++            send_player_state(ws_tx, player.volume()).await;
+         }
+         Message::StreamClear(_) => {
+             player.stop();
+             stream.reset();
+-            send_player_state(ws_tx, player.volume(), false).await;
++            send_player_state(ws_tx, player.volume()).await;
+         }
+         Message::ServerCommand(command) => {
+             if let Some(player_cmd) = &command.player {
+@@ -273,9 +218,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
                          if let Some(vol) = player_cmd.volume {
                              info!("← Setting volume to {}", vol);
                              player.set_volume(vol);
@@ -917,7 +973,7 @@ index 7c76415..1d573bd 100644
                          }
                      }
                      _ => {
-@@ -431,8 +373,8 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+@@ -431,13 +374,11 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
                      bit_depth: 16,
                  },
              ],
@@ -928,7 +984,17 @@ index 7c76415..1d573bd 100644
          })
          .controller()
          .initial_player_state(PlayerState {
-@@ -453,10 +395,31 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+-            volume: Some(config.volume),
+-            muted: Some(false),
+             // We don't compensate for external speaker/amplifier latency.
+             static_delay_ms: Some(0),
+             // `buffer_ms` (--buffer) is the lead time this client waits before
+@@ -449,14 +390,36 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+             // We don't implement PlayerCommandType::SetStaticDelay yet, so
+             // don't advertise support for it.
+             supported_commands: None,
++            ..volume_player_state(config.volume)
+         })
          .build()
  }
  
@@ -1023,13 +1089,61 @@ index 7c76415..1d573bd 100644
                      std::process::exit(0);
                  }
                  msg = message_rx.recv() => {
-@@ -598,6 +543,63 @@ pub async fn run() -> Result<(), SendspinError> {
+@@ -598,6 +543,111 @@ pub async fn run() -> Result<(), SendspinError> {
  mod tests {
      use super::*;
  
 +    fn args() -> Args {
 +        Args::try_parse_from(["sendspin", "--server", "example.test", "--port", "8927",
 +            "--client-id", "fixed-id", "--name", "Optical player", "--device", "hw:0,1"]).unwrap()
++    }
++
++    #[tokio::test]
++    async fn volume_only_state_omits_muted_on_handshake_and_routine_updates() {
++        use futures_util::{SinkExt, StreamExt};
++        use serde_json::{Value, json};
++        use tokio_tungstenite::tungstenite::Message as WsMessage;
++
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        let server = tokio::spawn(async move {
++            let (socket, _) = listener.accept().await.unwrap();
++            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
++            let hello = ws.next().await.unwrap().unwrap();
++            let hello: Value = serde_json::from_str(hello.to_text().unwrap()).unwrap();
++            assert_eq!(hello["payload"]["player@v1_support"]["supported_commands"], json!(["volume"]));
++            ws.send(WsMessage::Text(json!({
++                "type": "server/hello",
++                "payload": {"server_id": "test-server", "name": "Test server", "version": 1,
++                    "active_roles": ["player@v1"], "connection_reason": "playback"}
++            }).to_string().into())).await.unwrap();
++            let mut states = Vec::new();
++            while states.len() < 2 {
++                let frame = ws.next().await.unwrap().unwrap();
++                if let WsMessage::Text(text) = frame {
++                    let message: Value = serde_json::from_str(&text).unwrap();
++                    if message["type"] == "client/state" {
++                        states.push(message);
++                    }
++                }
++            }
++            states
++        });
++
++        let observation = async {
++            let connection = build_client(&resolve_config(&args()), LEAD_TIME_MS)
++                .connect(&format!("ws://{address}/sendspin")).await.unwrap().split();
++            send_player_state(&connection.sender, 73).await;
++            server.await.unwrap()
++        };
++        let states = tokio::time::timeout(Duration::from_secs(5), observation).await.unwrap();
++        assert_eq!(states[0]["payload"]["player"]["volume"], json!(20));
++        assert_eq!(states[0]["payload"]["player"]["required_lead_time_ms"], json!(100));
++        assert_eq!(states[0]["payload"]["player"]["min_buffer_ms"], json!(100));
++        assert_eq!(states[1]["payload"]["player"]["volume"], json!(73));
++        assert!(states[1]["payload"].get("state").is_none());
++        let mute_fields: Vec<_> = states.iter().map(|state| state["payload"]["player"].get("muted")).collect();
++        assert_eq!(mute_fields, vec![None, None], "volume-only client must omit muted, not emit false or null");
 +    }
 +
 +    #[test]
