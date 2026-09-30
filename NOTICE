@@ -1,0 +1,31 @@
+macbook-sendspin — third-party notices
+
+This recipe builds a Linux kernel (GPL-2.0-only), modifies Sendspin CLI
+v0.0.10 (Apache-2.0) and sendspin-rs 0.3.7 (MIT OR Apache-2.0), uses
+LinuxKit (Apache-2.0), musl (MIT and component notices in musl-COPYRIGHT),
+and links against ALSA libasound (LGPL-2.1-or-later). ALSA is a shared
+library, not statically incorporated into the player. The appliance
+permits replacement of libasound with an interface-compatible version by
+rebuilding its image; there is no signature or vendor authorization gate.
+Modification and reverse engineering for debugging such modifications
+are not prohibited by this project.
+
+LinuxKit's pinned init image also includes Alpine's BusyBox
+(GPL-2.0-only), alpine-baselayout (GPL-2.0-only), and musl. Their upstream
+source, Alpine build recipes/patches, and notices must accompany any
+redistributed appliance artifacts, together with the Linux source and
+this repository's build recipes, kernel configuration and player patches.
+The exact immutable input identifiers are recorded in build/inputs.lock.
+
+Sendspin source files modified by this recipe carry modification notices.
+Upstream copyrights and licenses remain with their respective owners.
+See licenses/ for retained upstream license texts. The exported out/licenses
+bundle additionally retains third-party dependency licenses/notices and
+corresponding source inputs under sources/. Distribute that bundle beside
+the kernel, initramfs and OCI image; a link to upstream alone is not a substitute for
+providing corresponding source when distributing GPL/LGPL binaries.
+
+These notices do not replace or restrict any upstream license. They do
+not constitute a warranty or a claim that an unbuilt dependency closure
+has been audited. Before distributing an image, verify its generated
+legal bundle against the actual binaries and any overridden build inputs.

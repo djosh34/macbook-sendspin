@@ -1,0 +1,53 @@
+# Example only: halted, no disks, no deployment performed by this recipe.
+# Replace the image/server/identity values before operator-controlled rollout.
+# The existing guest must release this exclusive HDA controller first.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: macbook-sendspin
+  namespace: macbook-audio
+spec:
+  runStrategy: Halted
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: macbook-sendspin
+    spec:
+      architecture: amd64
+      nodeSelector:
+        kubernetes.io/hostname: macbook-pro
+      domain:
+        machine:
+          type: q35
+        resources:
+          requests:
+            memory: 512Mi
+        devices:
+          autoattachGraphicsDevice: false
+          autoattachPodInterface: false
+          autoattachSerialConsole: true
+          logSerialConsole: true
+          rng: {}
+          interfaces:
+            - name: default
+              model: virtio
+              masquerade: {}
+          hostDevices:
+            - name: hda
+              deviceName: devices.kubevirt.io/macbook-hda
+        firmware:
+          kernelBoot:
+            container:
+              image: registry.example.com/macbook-sendspin:replace-me
+              imagePullPolicy: IfNotPresent
+              kernelPath: /kernel
+              initrdPath: /initrd.img
+            kernelArgs: >-
+              console=ttyS0,115200
+              sendspin.server=music-assistant.example.com
+              sendspin.port=8927
+              sendspin.id=macbook-optical
+              sendspin.name=MacBook%20Optical
+      networks:
+        - name: default
+          pod: {}

@@ -49,6 +49,10 @@ jobs:
           command -v make
           podman --version
           make --version
+          build_help="$(podman build --help)"
+          printf '%s\n' 'Podman build timestamp capabilities:'
+          printf '%s\n' "$build_help" | \
+            grep -E -- '(^|[[:space:]])--(timestamp|source-date-epoch|rewrite-timestamp)([[:space:]=]|$)' || true
 
       - name: Check
         run: make check

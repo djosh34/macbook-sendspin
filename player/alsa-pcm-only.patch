@@ -1,0 +1,27 @@
+--- a/src/pcm/pcm_hw.c
++++ b/src/pcm/pcm_hw.c
+@@ -1765,6 +1765,24 @@
+ 	snd_ctl_t *ctl;
+ 
+ 	assert(pcmp);
++
++	/* Modified 2026-09-30 for macbook-sendspin: fixed optical PCM-only sandbox.
++	 * Preparation verifies card 0/device 1 before dropping control access.
++	 * Do not open controlC0 or use the card-global preferred subdevice.
++	 * Kernel permissions expose only pcmC0D1p to the player process.
++	 */
++	if (card == 0 && device == 1 && subdevice == -1 &&
++	    stream == SND_PCM_STREAM_PLAYBACK) {
++		fmode = O_RDWR;
++		if (mode & SND_PCM_NONBLOCK)
++			fmode |= O_NONBLOCK;
++		if (mode & SND_PCM_ASYNC)
++			fmode |= O_ASYNC;
++		fd = snd_open_device("/dev/snd/pcmC0D1p", fmode);
++		if (fd < 0)
++			return -errno;
++		return snd_pcm_hw_open_fd(pcmp, name, fd, sync_ptr_ioctl);
++	}
+ 
+ 	if ((ret = snd_ctl_hw_open(&ctl, NULL, card, 0)) < 0)
+ 		return ret;

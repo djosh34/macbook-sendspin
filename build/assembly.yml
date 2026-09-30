@@ -1,0 +1,9 @@
+# LinuxKit v1.8.2: init images are extracted as data, never executed at build time.
+kernel:
+  image: docker.io/sendspin/kernel:local
+  tar: none
+  cmdline: console=ttyS0,115200
+init:
+  - "@INIT_REF@"
+  - docker.io/sendspin/application:local
+# No containerd/runc services: BusyBox's native inittab supervises fixed commands.

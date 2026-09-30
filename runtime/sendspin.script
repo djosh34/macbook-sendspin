@@ -1,0 +1,42 @@
+#!/bin/sh
+# BusyBox DHCP invokes this fixed hook. Lease values are always data, never code.
+set -efu
+# Preserve newline through command substitution using a fixed suffix.
+IFS="$(printf ' \t\n_')"
+IFS=${IFS%_}
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+umask 022
+ipv4_data() {
+    case "$1" in ''|*[!0-9.]*) return 1 ;; esac
+}
+case "${1:-}" in
+    deconfig)
+        ip address flush dev eth0
+        ip link set eth0 up
+        ;;
+    bound|renew)
+        ipv4_data "${ip:-}" && ipv4_data "${subnet:-}" || exit 1
+        ip route flush dev eth0
+        ip address flush dev eth0
+        ip address add "$ip/$subnet" dev eth0
+        ip link set eth0 up
+        # DHCP router/DNS lists are space-separated numeric addresses only.
+        for gateway in ${router:-}; do
+            ipv4_data "$gateway" || exit 1
+            ip route add default via "$gateway" dev eth0
+            break
+        done
+        # Replace inside the directory bound RO in the player namespace: renewal
+        # updates DNS without re-reading boot configuration or writable state.
+        temporary=/run/network/resolv.conf.new
+        : > "$temporary"
+        for resolver in ${dns:-}; do
+            ipv4_data "$resolver" || exit 1
+            printf 'nameserver %s\n' "$resolver" >> "$temporary"
+        done
+        chmod 0644 "$temporary"
+        mv -f "$temporary" /run/network/resolv.conf
+        ;;
+    *) exit 0 ;;
+esac

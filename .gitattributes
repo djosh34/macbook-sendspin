@@ -1,0 +1,3 @@
+# Preserve upstream license texts and unified-diff context byte-for-byte.
+licenses/** -whitespace
+player/*.patch -whitespace
