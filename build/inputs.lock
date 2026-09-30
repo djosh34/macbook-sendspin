@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "images": {
+    "debian": {
+      "tag": "docker.io/library/debian:bookworm-slim",
+      "ref": "docker.io/library/debian@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+      "index_digest": "sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+      "platforms": {
+        "amd64": {
+          "digest": "sha256:f3034a6ec3c1205360777c4aae76234998866ad18806ae62b63a3f84ccad782b"
+        },
+        "arm64": {
+          "digest": "sha256:0c8bbb8e987a035fe1d9704eb2e571b7e9a836e1caa46345290674b45b69e417"
+        }
+      }
+    },
+    "rust": {
+      "tag": "docker.io/library/rust:1.95.0-bookworm",
+      "ref": "docker.io/library/rust@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+      "index_digest": "sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+      "platforms": {
+        "amd64": {
+          "digest": "sha256:4c2fd73ef19c5ef9d54bee03b06b2839a392604fbfcd578ed948b71b37c1d7fb"
+        },
+        "arm64": {
+          "digest": "sha256:8e45ae5b178fa788bbbd818b42a1f93a6e2c03e7144badd5e0a37087537177e1"
+        }
+      }
+    },
+    "golang": {
+      "tag": "docker.io/library/golang:1.25.1-bookworm",
+      "ref": "docker.io/library/golang@sha256:c423747fbd96fd8f0b1102d947f51f9b266060217478e5f9bf86f145969562ee",
+      "index_digest": "sha256:c423747fbd96fd8f0b1102d947f51f9b266060217478e5f9bf86f145969562ee",
+      "platforms": {
+        "amd64": {
+          "digest": "sha256:299c4191248a84de928626d34afe734505ed7307ed67263b66ce2bc645b51523"
+        },
+        "arm64": {
+          "digest": "sha256:996e8f3cda9d04d55d643686259736e30018fcfe4569d2de1eec846b9e79227d"
+        }
+      }
+    },
+    "linuxkit_init": {
+      "tag": "docker.io/linuxkit/init:680da6e6f79bb8236a095147d532cd2160e23c9f",
+      "ref": "docker.io/linuxkit/init@sha256:701f49148286c74400b140726b82c660e852aa8380ab00659125198fedd61430",
+      "index_digest": "sha256:b2a9182853e6d08e915f644a41a0ddf7af744fbb83369bae5caab672c83b5046",
+      "platforms": {
+        "amd64": {
+          "digest": "sha256:701f49148286c74400b140726b82c660e852aa8380ab00659125198fedd61430"
+        },
+        "arm64": {
+          "digest": "sha256:08d22289b4f1132c600b769817e8b42762c0f5b5e8b45271efee1457d8e1967e"
+        }
+      },
+      "source_commit": "43200ea6342590c6806f808b318d7f3a69b0cdd8",
+      "target_only": true
+    }
+  },
+  "sources": {
+    "linux": {
+      "version": "6.12.111",
+      "url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.111.tar.xz",
+      "sha256": "9e59dc67624188fa12a6601f9598499cd6662a9066be572b59f935e3d7849810",
+      "license": "GPL-2.0-only"
+    },
+    "musl": {
+      "version": "1.2.5",
+      "url": "https://musl.libc.org/releases/musl-1.2.5.tar.gz",
+      "sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+      "license": "MIT"
+    },
+    "alsa": {
+      "version": "1.2.14",
+      "url": "https://www.alsa-project.org/files/pub/lib/alsa-lib-1.2.14.tar.bz2",
+      "sha256": "be9c88a0b3604367dd74167a2b754a35e142f670292ae47a2fdef27a2ee97a32",
+      "license": "LGPL-2.1-or-later"
+    },
+    "sendspin": {
+      "version": "0.0.10",
+      "url": "https://codeload.github.com/s3than/sendspin-rs-cli/tar.gz/63749008fb868bf72a16e9dcb21072fae30284c9",
+      "sha256": "dae793d4fbca6796d090bd86804407636d040b3cfbf1bdecaa47ea5b59a75a5e",
+      "license": "Apache-2.0",
+      "commit": "63749008fb868bf72a16e9dcb21072fae30284c9"
+    },
+    "sendspin_protocol": {
+      "version": "0.3.7",
+      "url": "https://static.crates.io/crates/sendspin/sendspin-0.3.7.crate",
+      "sha256": "385582e65769c399069c12d81b65322040d31eba500935542cf143f9ebe8e7f4",
+      "license": "MIT OR Apache-2.0"
+    },
+    "linuxkit": {
+      "version": "1.8.2",
+      "url": "https://codeload.github.com/linuxkit/linuxkit/tar.gz/43200ea6342590c6806f808b318d7f3a69b0cdd8",
+      "sha256": "8cf1ec58b14e4ff2f6371a785104ad9a7bb1d5835c5f963d292163eb22d7f4f9",
+      "license": "Apache-2.0",
+      "commit": "43200ea6342590c6806f808b318d7f3a69b0cdd8"
+    },
+    "busybox": {
+      "version": "1.37.0",
+      "url": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+      "sha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+      "license": "GPL-2.0-only"
+    },
+    "alpine_aports": {
+      "commit": "bd8ab811155a6087ba7480103d89e2500e3cb0eb",
+      "url": "https://codeload.github.com/alpinelinux/aports/tar.gz/bd8ab811155a6087ba7480103d89e2500e3cb0eb",
+      "sha256": "c3361b5e5f05d94cd76dbfbf382ed3bd02945e1c7fbd41cfedfc41d00034bc31",
+      "include": [
+        "main/busybox",
+        "main/alpine-baselayout",
+        "main/musl"
+      ],
+      "packages": {
+        "busybox": {
+          "version": "1.37.0-r19",
+          "build_commit": "bd8ab811155a6087ba7480103d89e2500e3cb0eb"
+        },
+        "alpine-baselayout": {
+          "version": "3.7.0-r0",
+          "build_commit": "540d8477019887cc6534152e92c3b12676e35d7b"
+        },
+        "musl": {
+          "version": "1.2.5-r10",
+          "build_commit": "1a5f5e699b2eae883e73c93a789f87bd89a2a190"
+        }
+      }
+    },
+    "netbase_protocols": {
+      "version": "6.4",
+      "url": "https://salsa.debian.org/md/netbase/-/raw/v6.4/etc/protocols",
+      "sha256": "4959498abbadaa1e50894a266f8d0d94500101cfe5b5f09dcad82e9d5bdfab46"
+    },
+    "netbase_services": {
+      "version": "6.4",
+      "url": "https://salsa.debian.org/md/netbase/-/raw/v6.4/etc/services",
+      "sha256": "f6183055fd949f9c53d49ee620f85d0150123ea691d25ed1bba0c641b4ee2f48"
+    }
+  },
+  "debian_snapshot": {
+    "timestamp": "20260901T000000Z",
+    "url": "https://snapshot.debian.org/archive/debian/20260901T000000Z/",
+    "release_sha256": "abcf5882746e0f68171f41adbb4ac01b74b49d62d203379befb9265804311a4f"
+  },
+  "notices": {
+    "llvm_libunwind": {
+      "commit": "1cb4e3833c1919c2e6fb579a23ac0e2b22587b7e",
+      "url": "https://raw.githubusercontent.com/rust-lang/llvm-project/1cb4e3833c1919c2e6fb579a23ac0e2b22587b7e/libunwind/LICENSE.TXT",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d"
+    },
+    "rust": {
+      "commit": "59807616e1fa2540724bfbac14d7976d7e4a3860",
+      "copyright_sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af"
+    }
+  },
+  "downloads": {
+    "rust_distribution_manifest": {
+      "url": "https://static.rust-lang.org/dist/channel-rust-1.95.0.toml",
+      "sha256": "821ff14e4c4a1cbe1e8915f35aff0a3fbbdf8d293ad48ab8f31e3b0440c581f9",
+      "version": "1.95.0"
+    },
+    "rust_target_std": {
+      "url": "https://static.rust-lang.org/dist/2026-04-16/rust-std-1.95.0-x86_64-unknown-linux-musl.tar.xz",
+      "sha256": "aee540abf132920f791ef781489851a078d69dff493fb628d49c1d573f92bb3a",
+      "target": "x86_64-unknown-linux-musl"
+    }
+  }
+}

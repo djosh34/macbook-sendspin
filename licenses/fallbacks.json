@@ -1,0 +1,27 @@
+{
+  "dasp_sample-0.11.0": {
+    "package_checksum": "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f",
+    "license": "MIT OR Apache-2.0",
+    "repository": "https://github.com/rustaudio/sample.git",
+    "upstream_repository": "https://github.com/RustAudio/dasp",
+    "source_commit": "97c3bb9b2363c0b46ac1633858bf1054fd02a980",
+    "reason": "Published subcrate omits workspace-root license files; .cargo_vcs_info.json identifies this upstream commit.",
+    "files": {
+      "LICENSE-MIT": "b1d6df41ed3aa96806e74c729444d7c121d90e6660a6aed01d298e03fde475a0",
+      "LICENSE-APACHE": "756c8d2ab2dc24f256e1455b5f03937f4933d83d7bc9f2d55009fc962377d512"
+    }
+  },
+  "defmt-parser-1.0.0": {
+    "package_checksum": "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e",
+    "license": "MIT OR Apache-2.0",
+    "repository": "https://github.com/knurling-rs/defmt",
+    "upstream_repository": "https://github.com/knurling-rs/defmt",
+    "source_commit": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+    "path_in_vcs": "parser",
+    "reason": "Published parser subcrate omits workspace-root license files; .cargo_vcs_info.json identifies this upstream commit and parser path.",
+    "files": {
+      "LICENSE-APACHE": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+      "LICENSE-MIT": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+    }
+  }
+}

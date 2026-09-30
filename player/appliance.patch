@@ -1,0 +1,1357 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 4e947d5..c77cf7c 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,34 +1,21 @@
++# Modified for macbook-sendspin: ALSA-only stateless appliance.
+ [package]
+ name = "sendspin-rs-cli"
+ version = "0.0.10"
+ edition = "2024"
+ 
+ [dependencies]
+-sendspin = "0.3.7"
++sendspin = { path = "protocol", version = "=0.3.7", default-features = false }
+ clap = { version = "4.5", features = ["derive"] }
+ tokio = { version = "1", features = ["full"] }
+-anyhow = "1.0"
+ log = "0.4"
+ env_logger = "0.11"
+-uuid = { version = "1.0", features = ["v4"] }
+-serde = { version = "1.0", features = ["derive"] }
+-serde_json = "1.0"
+-futures-util = "0.3"
+-tokio-tungstenite = "0.30"
+-mdns-sd = "0.21"
+ thiserror = "2"
+-hostname = "0.4"
+ parking_lot = "0.12"
+-toml = "1.1"
+-dirs = "7.0"
+-
+-[target.'cfg(target_os = "linux")'.dependencies]
+-cpal = { version = "0.18", features = ["pipewire"] }
+-# Locked to 0.11 (not 0.12+): cpal's own ALSA backend depends on alsa "^0.11",
+-# which pulls alsa-sys "^0.4". alsa 0.12 needs alsa-sys "^0.6", and Cargo's
+-# `links = "alsa"` uniqueness rule forbids two alsa-sys versions in the same
+-# build. Revisit once cpal bumps its own alsa dependency.
+ alsa = "0.11"
++dasp_sample = "0.11"
+ 
+-[target.'cfg(not(target_os = "linux"))'.dependencies]
+-cpal = "0.18"
++[profile.release]
++opt-level = 3
++strip = true
++codegen-units = 1
+diff --git a/src/alsa_output.rs b/src/alsa_output.rs
+index 8a9620e..686adac 100644
+--- a/src/alsa_output.rs
++++ b/src/alsa_output.rs
+@@ -1,3 +1,4 @@
++// Modified for macbook-sendspin: ALSA-only stateless appliance.
+ // Direct ALSA Audio Output (Linux-only)
+ //
+ // Opens an ALSA device string directly (e.g. "plughw:0,0", "default:CARD=MOMENTUM4")
+@@ -8,7 +9,7 @@
+ 
+ use alsa::pcm::{Access, Format, HwParams, PCM};
+ use alsa::{Direction, ValueOr};
+-use cpal::Sample as _;
++use dasp_sample::Sample as _;
+ use log::info;
+ use sendspin::audio::AudioFormat;
+ use sendspin::audio::types::Sample;
+@@ -24,6 +25,7 @@ pub struct AlsaAudioOutput {
+ 
+ impl AlsaAudioOutput {
+     pub fn new(device: &str, input_format: &AudioFormat) -> Result<Self, SendspinError> {
++        crate::validate_device(device).map_err(SendspinError::Config)?;
+         let pcm = PCM::new(device, Direction::Playback, false)
+             .map_err(|e| SendspinError::DeviceNotFound(format!("{}: {}", device, e)))?;
+ 
+@@ -107,6 +109,8 @@ impl AlsaAudioOutput {
+                 .get_rate()
+                 .map_err(|e| SendspinError::Audio(format!("ALSA get_rate failed: {}", e)))?;
+ 
++            require_exact_rate(input_format.sample_rate, actual_rate)?;
++
+             let actual_buffer = hwp
+                 .get_buffer_size()
+                 .map_err(|e| SendspinError::Audio(format!("ALSA get_buffer_size failed: {}", e)))?;
+@@ -175,3 +179,22 @@ impl AlsaAudioOutput {
+         Ok(())
+     }
+ }
++
++fn require_exact_rate(requested: u32, actual: u32) -> Result<(), SendspinError> {
++    if requested != actual {
++        return Err(SendspinError::Audio(format!("ALSA rate mismatch: requested {}Hz, got {}Hz", requested, actual)));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn rejects_rate_drift_instead_of_resampling() {
++        assert!(require_exact_rate(44100, 44100).is_ok());
++        assert!(require_exact_rate(48000, 48000).is_ok());
++        assert!(require_exact_rate(44100, 48000).is_err());
++        assert!(require_exact_rate(48000, 44100).is_err());
++    }
++}
+diff --git a/src/audio.rs b/src/audio.rs
+index 24cfb92..d6b553d 100644
+--- a/src/audio.rs
++++ b/src/audio.rs
+@@ -1,389 +1,21 @@
+-// Native Audio Output
+-//
+-// Builds a cpal stream at the device's native format to avoid ALSA resampling.
+-// On hosts like Asahi Linux the device may report F32 44100Hz while incoming
+-// audio is 48000Hz; this module handles the rate conversion in the audio callback.
+-
+-use cpal::Sample as _;
+-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+-use log::{info, warn};
++// Modified for macbook-sendspin: ALSA-only stateless appliance.
++// No default output, plugin PCM, resampling, or alternative backend.
++use crate::alsa_output::AlsaAudioOutput;
++use crate::error::SendspinError;
+ use sendspin::audio::AudioFormat;
+ use sendspin::audio::types::Sample;
+-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+-use std::sync::{Arc, Mutex, mpsc};
+-use std::time::{Duration, Instant};
+-
+-use crate::error::SendspinError;
+-
+-#[cfg(target_os = "linux")]
+-use crate::alsa_output::AlsaAudioOutput;
++use std::sync::Arc;
+ 
+-/// Unified audio output that dispatches between cpal (default) and direct ALSA.
+-pub enum AudioOutput {
+-    Cpal(NativeAudioOutput),
+-    #[cfg(target_os = "linux")]
+-    Alsa(AlsaAudioOutput),
+-}
++pub struct AudioOutput(AlsaAudioOutput);
+ 
+ impl AudioOutput {
+-    /// Create a new audio output. When `device` is Some on Linux, uses direct ALSA;
+-    /// otherwise uses cpal (PipeWire/default host).
+-    pub fn new(
+-        input_format: AudioFormat,
+-        audio_buffer_frames: u32,
+-        device: &Option<String>,
+-    ) -> Result<Self, SendspinError> {
+-        #[cfg(target_os = "linux")]
+-        if let Some(alsa_device) = device {
+-            return Ok(AudioOutput::Alsa(AlsaAudioOutput::new(
+-                alsa_device,
+-                &input_format,
+-            )?));
+-        }
+-
+-        #[cfg(not(target_os = "linux"))]
+-        let _ = device; // suppress unused warning
+-
+-        Ok(AudioOutput::Cpal(NativeAudioOutput::new(
+-            input_format,
+-            audio_buffer_frames,
+-        )?))
+-    }
+-
+-    pub fn write(&mut self, samples: &Arc<[Sample]>) -> Result<(), SendspinError> {
+-        match self {
+-            AudioOutput::Cpal(out) => out.write(samples),
+-            #[cfg(target_os = "linux")]
+-            AudioOutput::Alsa(out) => out.write(samples),
+-        }
+-    }
+-}
+-
+-/// Rate-limits repeated audio stream error logs.
+-///
+-/// Some backends can retry a broken stream in a tight loop with no backoff
+-/// (e.g. the ALSA host against certain devices, notably PipeWire's
+-/// ALSA-compatibility shim against Bluetooth A2DP sinks), firing the error
+-/// callback thousands of times a second. Logging every occurrence floods the
+-/// journal and burns CPU on string formatting on top of whatever the backend
+-/// itself is spinning on. This logs at most once per second and reports how
+-/// many occurrences were suppressed in between.
+-struct ErrorRateLimiter {
+-    last_logged: Mutex<Instant>,
+-    suppressed: AtomicU32,
+-}
+-
+-impl ErrorRateLimiter {
+-    fn new() -> Self {
+-        Self {
+-            // Backdate so the first error logs immediately.
+-            last_logged: Mutex::new(Instant::now() - Duration::from_secs(1)),
+-            suppressed: AtomicU32::new(0),
+-        }
+-    }
+-
+-    fn log(&self, err: cpal::Error) {
+-        let now = Instant::now();
+-        let mut last = self.last_logged.lock().unwrap();
+-        if now.duration_since(*last) >= Duration::from_secs(1) {
+-            *last = now;
+-            let suppressed = self.suppressed.swap(0, Ordering::Relaxed);
+-            if suppressed > 0 {
+-                warn!(
+-                    "Audio stream error: {} ({} more suppressed in the last second)",
+-                    err, suppressed
+-                );
+-            } else {
+-                warn!("Audio stream error: {}", err);
+-            }
+-        } else {
+-            self.suppressed.fetch_add(1, Ordering::Relaxed);
+-        }
+-    }
+-}
+-
+-#[cfg(test)]
+-mod error_rate_limiter_tests {
+-    use super::*;
+-
+-    fn dummy_error() -> cpal::Error {
+-        cpal::Error::from(cpal::ErrorKind::Xrun)
+-    }
+-
+-    #[test]
+-    fn first_error_is_not_suppressed() {
+-        let limiter = ErrorRateLimiter::new();
+-        limiter.log(dummy_error());
+-        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 0);
+-    }
+-
+-    #[test]
+-    fn rapid_repeats_within_the_window_are_suppressed_not_logged_individually() {
+-        let limiter = ErrorRateLimiter::new();
+-        limiter.log(dummy_error()); // logs immediately, opens the 1s window
+-        for _ in 0..999 {
+-            limiter.log(dummy_error());
+-        }
+-        // None of these should have logged (or reset the window) since
+-        // they land inside the same second as the first log.
+-        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 999);
+-    }
+-
+-    #[test]
+-    fn window_elapsing_flushes_the_suppressed_count_and_logs_again() {
+-        let limiter = ErrorRateLimiter::new();
+-        limiter.log(dummy_error());
+-        limiter.log(dummy_error());
+-        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 1);
+-
+-        // Simulate a second passing without a real sleep in the test.
+-        *limiter.last_logged.lock().unwrap() = Instant::now() - Duration::from_secs(2);
+-
+-        limiter.log(dummy_error());
+-        // Crossing the window boundary logs again and resets the counter.
+-        assert_eq!(limiter.suppressed.load(Ordering::Relaxed), 0);
+-    }
+-}
+-
+-/// Audio output that uses cpal at the device's native format (default host).
+-///
+-/// On Asahi Linux the device reports F32 44100Hz, but incoming audio may be
+-/// 48000Hz. This struct builds the cpal stream at the device's native rate
+-/// and resamples in the audio callback if needed.
+-pub struct NativeAudioOutput {
+-    pub sample_tx: mpsc::SyncSender<Arc<[Sample]>>,
+-    _stream: cpal::Stream,
+-    _latency_micros: Arc<AtomicU64>,
+-}
+-
+-impl NativeAudioOutput {
+-    /// Prefer cpal's native PipeWire host over the default (ALSA) host on Linux.
+-    ///
+-    /// The default ALSA host talks to PipeWire's ALSA-compatibility shim
+-    /// (`pcm_pipewire`), which is unstable against Bluetooth A2DP sinks and can
+-    /// spin in a tight `POLLERR` retry loop with no backoff (pegging a CPU core).
+-    /// The native PipeWire host is a real PipeWire client and doesn't hit this.
+-    ///
+-    /// Falls back to `cpal::default_host()` when PipeWire isn't available (e.g.
+-    /// non-PipeWire distros, or a session without a PipeWire server running) so
+-    /// this only changes behavior when PipeWire is actually present.
+-    fn select_host() -> cpal::Host {
+-        #[cfg(target_os = "linux")]
+-        {
+-            match cpal::host_from_id(cpal::HostId::PipeWire) {
+-                Ok(host) => {
+-                    info!("Using PipeWire audio host");
+-                    return host;
+-                }
+-                Err(err) => {
+-                    warn!(
+-                        "PipeWire audio host unavailable ({}), falling back to default host",
+-                        err
+-                    );
+-                }
+-            }
+-        }
+-        cpal::default_host()
+-    }
+-
+-    pub fn new(input_format: AudioFormat, audio_buffer_frames: u32) -> Result<Self, SendspinError> {
+-        let host = Self::select_host();
+-        let device = host
+-            .default_output_device()
+-            .ok_or(SendspinError::NoOutputDevice)?;
+-
+-        let default_config = device.default_output_config()?;
+-        let device_sample_rate = default_config.sample_rate();
+-        let device_channels = default_config.channels();
+-        let device_sample_format = default_config.sample_format();
+-
+-        info!(
+-            "Device native: {:?} {}Hz {}ch",
+-            device_sample_format, device_sample_rate, device_channels
+-        );
+-        info!(
+-            "Input format: {}Hz {}ch {}bit",
+-            input_format.sample_rate, input_format.channels, input_format.bit_depth
+-        );
+-
+-        let input_rate = input_format.sample_rate;
+-        let input_channels = input_format.channels as u16;
+-        let needs_resample = input_rate != device_sample_rate;
+-
+-        if needs_resample {
+-            info!(
+-                "Resampling {}Hz -> {}Hz in audio callback",
+-                input_rate, device_sample_rate
+-            );
+-        }
+-
+-        // Build stream at the device's native config.
+-        let buffer_size = if audio_buffer_frames == 0 {
+-            cpal::BufferSize::Default
+-        } else {
+-            cpal::BufferSize::Fixed(audio_buffer_frames)
+-        };
+-        let config = cpal::StreamConfig {
+-            channels: device_channels,
+-            sample_rate: device_sample_rate,
+-            buffer_size,
+-        };
+-
+-        // Bounded channel for backpressure (~10 buffers)
+-        let (sample_tx, sample_rx) = mpsc::sync_channel::<Arc<[Sample]>>(10);
+-        let sample_rx = Mutex::new(sample_rx);
+-
+-        let latency_micros = Arc::new(AtomicU64::new(0));
+-        let latency_clone = Arc::clone(&latency_micros);
+-        let error_limiter = Arc::new(ErrorRateLimiter::new());
+-
+-        // State for the audio callback
+-        let mut current_buffer: Option<Arc<[Sample]>> = None;
+-        let mut buffer_pos: usize = 0;
+-        // Resampling state: fractional position in the input buffer
+-        let device_rate_u32 = device_sample_rate;
+-        let ratio = if needs_resample {
+-            input_rate as f64 / device_rate_u32 as f64
+-        } else {
+-            1.0
+-        };
+-        let mut resample_pos: f64 = 0.0;
+-
+-        // Shared callback state — produces the next sample as f32.
+-        // Moved into a closure so the same logic works for all output formats.
+-        let next_sample = move |current_buffer: &mut Option<Arc<[Sample]>>,
+-                                buffer_pos: &mut usize,
+-                                resample_pos: &mut f64|
+-              -> f32 {
+-            let need_new = match current_buffer {
+-                Some(buf) => {
+-                    if needs_resample {
+-                        let max_pos = buf.len() / input_channels as usize;
+-                        *resample_pos >= max_pos as f64
+-                    } else {
+-                        *buffer_pos >= buf.len()
+-                    }
+-                }
+-                None => true,
+-            };
+-
+-            if need_new
+-                && let Ok(rx) = sample_rx.lock()
+-                && let Ok(buf) = rx.try_recv()
+-            {
+-                *current_buffer = Some(buf);
+-                *buffer_pos = 0;
+-                *resample_pos = 0.0;
+-            }
+-
+-            if let Some(buf) = current_buffer {
+-                if needs_resample {
+-                    let frames = buf.len() / input_channels as usize;
+-                    let frame_idx = *resample_pos as usize;
+-
+-                    if frame_idx < frames {
+-                        let out_ch = *buffer_pos % device_channels as usize;
+-                        let in_ch = if out_ch < input_channels as usize {
+-                            out_ch
+-                        } else {
+-                            0
+-                        };
+-
+-                        let idx0 = frame_idx * input_channels as usize + in_ch;
+-                        let s0 = f32::from_sample(buf[idx0]);
+-
+-                        let s1 = if frame_idx + 1 < frames {
+-                            let idx1 = (frame_idx + 1) * input_channels as usize + in_ch;
+-                            f32::from_sample(buf[idx1])
+-                        } else {
+-                            s0
+-                        };
+-
+-                        let frac = *resample_pos - frame_idx as f64;
+-                        let val = s0 + (s1 - s0) * frac as f32;
+-
+-                        *buffer_pos += 1;
+-                        if (*buffer_pos).is_multiple_of(device_channels as usize) {
+-                            *resample_pos += ratio;
+-                        }
+-                        val
+-                    } else {
+-                        *buffer_pos += 1;
+-                        0.0
+-                    }
+-                } else if *buffer_pos < buf.len() {
+-                    let val = f32::from_sample(buf[*buffer_pos]);
+-                    *buffer_pos += 1;
+-                    val
+-                } else {
+-                    0.0
+-                }
+-            } else {
+-                0.0
+-            }
+-        };
+-
+-        // Build the stream using the device's native sample format.
+-        let stream = match device_sample_format {
+-            cpal::SampleFormat::I16 => device.build_output_stream(
+-                config,
+-                move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
+-                    let ts = info.timestamp();
+-                    let latency = ts.playback.duration_since(ts.callback);
+-                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
+-                    for sample_out in data.iter_mut() {
+-                        let val =
+-                            next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
+-                        *sample_out = (val * i16::MAX as f32) as i16;
+-                    }
+-                },
+-                move |err| error_limiter.log(err),
+-                None,
+-            )?,
+-            cpal::SampleFormat::I32 => device.build_output_stream(
+-                config,
+-                move |data: &mut [i32], info: &cpal::OutputCallbackInfo| {
+-                    let ts = info.timestamp();
+-                    let latency = ts.playback.duration_since(ts.callback);
+-                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
+-                    for sample_out in data.iter_mut() {
+-                        let val =
+-                            next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
+-                        *sample_out = (val as f64 * i32::MAX as f64) as i32;
+-                    }
+-                },
+-                move |err| error_limiter.log(err),
+-                None,
+-            )?,
+-            _ => device.build_output_stream(
+-                config,
+-                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+-                    let ts = info.timestamp();
+-                    let latency = ts.playback.duration_since(ts.callback);
+-                    latency_clone.store(latency.as_micros() as u64, Ordering::Relaxed);
+-                    for sample_out in data.iter_mut() {
+-                        *sample_out =
+-                            next_sample(&mut current_buffer, &mut buffer_pos, &mut resample_pos);
+-                    }
+-                },
+-                move |err| error_limiter.log(err),
+-                None,
+-            )?,
+-        };
+-
+-        stream.play()?;
+-
+-        Ok(NativeAudioOutput {
+-            sample_tx,
+-            _stream: stream,
+-            _latency_micros: latency_micros,
+-        })
++    pub fn new(input_format: AudioFormat, _audio_buffer_frames: u32, device: &Option<String>) -> Result<Self, SendspinError> {
++        let device = device.as_deref().ok_or_else(|| SendspinError::Config("explicit hardware PCM required".into()))?;
++        crate::validate_device(device).map_err(SendspinError::Config)?;
++        Ok(Self(AlsaAudioOutput::new(device, &input_format)?))
+     }
+ 
+     pub fn write(&mut self, samples: &Arc<[Sample]>) -> Result<(), SendspinError> {
+-        self.sample_tx
+-            .send(Arc::clone(samples))
+-            .map_err(|_| SendspinError::Audio("Failed to send samples to audio thread".into()))?;
+-        Ok(())
++        self.0.write(samples)
+     }
+ }
+diff --git a/src/config.rs b/src/config.rs
+deleted file mode 100644
+index ea9f6b0..0000000
+--- a/src/config.rs
++++ /dev/null
+@@ -1,128 +0,0 @@
+-use log::{info, warn};
+-use serde::{Deserialize, Serialize};
+-use std::path::PathBuf;
+-
+-#[derive(Debug, Default, Serialize, Deserialize)]
+-pub struct AppConfig {
+-    #[serde(default)]
+-    pub client_id: Option<String>,
+-    #[serde(default)]
+-    pub name: Option<String>,
+-    #[serde(default)]
+-    pub player: PlayerConfig,
+-}
+-
+-#[derive(Debug, Default, Serialize, Deserialize)]
+-pub struct PlayerConfig {
+-    pub volume: Option<u8>,
+-    pub device: Option<String>,
+-    pub audio_buffer: Option<u32>,
+-}
+-
+-fn config_path() -> Option<PathBuf> {
+-    dirs::config_dir().map(|d| d.join("sendspin-rs-cli").join("config.toml"))
+-}
+-
+-impl AppConfig {
+-    pub fn load() -> Self {
+-        let Some(path) = config_path() else {
+-            warn!("Could not determine config directory");
+-            return Self::default();
+-        };
+-
+-        match std::fs::read_to_string(&path) {
+-            Ok(contents) => match toml::from_str(&contents) {
+-                Ok(config) => {
+-                    info!("Loaded config from {}", path.display());
+-                    config
+-                }
+-                Err(e) => {
+-                    warn!("Failed to parse config {}: {}", path.display(), e);
+-                    Self::default()
+-                }
+-            },
+-            Err(_) => Self::default(),
+-        }
+-    }
+-
+-    pub fn save(&self) -> Result<(), String> {
+-        let path = config_path().ok_or("could not determine config directory")?;
+-
+-        if let Some(parent) = path.parent() {
+-            std::fs::create_dir_all(parent)
+-                .map_err(|e| format!("failed to create config dir: {}", e))?;
+-        }
+-
+-        let contents = toml::to_string_pretty(self)
+-            .map_err(|e| format!("failed to serialize config: {}", e))?;
+-
+-        std::fs::write(&path, contents)
+-            .map_err(|e| format!("failed to write config {}: {}", path.display(), e))?;
+-
+-        info!("Saved config to {}", path.display());
+-        Ok(())
+-    }
+-}
+-
+-/// Save volume to config file (intended to be called from tokio::task::spawn_blocking)
+-pub fn save_volume(vol: u8) {
+-    let mut config = AppConfig::load();
+-    config.player.volume = Some(vol);
+-    if let Err(e) = config.save() {
+-        warn!("Failed to save volume to config: {}", e);
+-    }
+-}
+-
+-/// Save name to config file
+-pub fn save_name(name: &str) {
+-    let mut config = AppConfig::load();
+-    config.name = Some(name.to_string());
+-    if let Err(e) = config.save() {
+-        warn!("Failed to save name to config: {}", e);
+-    }
+-}
+-
+-/// Save client_id to config file
+-pub fn save_client_id(id: &str) {
+-    let mut config = AppConfig::load();
+-    config.client_id = Some(id.to_string());
+-    if let Err(e) = config.save() {
+-        warn!("Failed to save client_id to config: {}", e);
+-    }
+-}
+-
+-/// Clear saved name from config file (falls back to the hostname default)
+-pub fn clear_name() {
+-    let mut config = AppConfig::load();
+-    config.name = None;
+-    if let Err(e) = config.save() {
+-        warn!("Failed to clear name from config: {}", e);
+-    }
+-}
+-
+-/// Clear saved device from config file (falls back to the default audio host)
+-pub fn clear_device() {
+-    let mut config = AppConfig::load();
+-    config.player.device = None;
+-    if let Err(e) = config.save() {
+-        warn!("Failed to clear device from config: {}", e);
+-    }
+-}
+-
+-/// Save device to config file
+-pub fn save_device(device: &str) {
+-    let mut config = AppConfig::load();
+-    config.player.device = Some(device.to_string());
+-    if let Err(e) = config.save() {
+-        warn!("Failed to save device to config: {}", e);
+-    }
+-}
+-
+-/// Save audio buffer size to config file
+-pub fn save_audio_buffer(frames: u32) {
+-    let mut config = AppConfig::load();
+-    config.player.audio_buffer = Some(frames);
+-    if let Err(e) = config.save() {
+-        warn!("Failed to save audio_buffer to config: {}", e);
+-    }
+-}
+diff --git a/src/error.rs b/src/error.rs
+index 5ae484c..a006cc5 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -1,35 +1,14 @@
++// Modified for macbook-sendspin: ALSA-only stateless appliance.
+ use thiserror::Error;
+ 
+ #[derive(Debug, Error)]
+ pub enum SendspinError {
+-    #[error("invalid volume {0}: must be 0-100")]
+-    InvalidVolume(u8),
+-
+-    #[error("mDNS discovery failed: {0}")]
+-    Discovery(String),
+-
+-    #[error("connection failed: {0}")]
+-    Connection(String),
+-
+     #[error("audio error: {0}")]
+     Audio(String),
+-
+-    #[error("no output device available")]
+-    NoOutputDevice,
+-
+     #[error("audio device not found: {0}")]
+     DeviceNotFound(String),
+-
+     #[error("config error: {0}")]
+     Config(String),
+-
+     #[error(transparent)]
+-    Cpal(#[from] cpal::Error),
+-
+-    #[error(transparent)]
+-    Mdns(#[from] mdns_sd::Error),
+-
+-    #[cfg(target_os = "linux")]
+-    #[error("ALSA error: {0}")]
+     Alsa(#[from] alsa::Error),
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+index 7c76415..1d573bd 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,4 @@
++// Modified for macbook-sendspin: ALSA-only stateless appliance.
+ // Sendspin Rust CLI Player - Full Protocol Implementation
+ //
+ // Design principles:
+@@ -10,9 +11,7 @@
+ #[cfg(target_os = "linux")]
+ pub mod alsa_output;
+ pub mod audio;
+-pub mod config;
+ pub mod error;
+-pub mod mdns;
+ pub mod player;
+ 
+ use clap::Parser;
+@@ -53,35 +52,29 @@ async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
+     let _ = ws_tx.send_message(state).await;
+ }
+ 
++const INITIAL_VOLUME: u8 = 20;
++const LEAD_TIME_MS: u64 = 100;
++
+ #[derive(Parser, Debug)]
+-#[command(name = "sendspin-rs-cli")]
++#[command(name = "sendspin")]
+ #[command(about = "Connect to Music Assistant and play audio", long_about = None)]
+ #[command(version)]
+ struct Args {
+-    #[arg(short, long)]
+-    server: Option<String>,
+-    /// Player name (saved to config; defaults to hostname). Pass with no value to reset to the hostname default.
+-    #[arg(short, long, num_args = 0..=1, default_missing_value = "")]
+-    name: Option<String>,
+-    /// Client ID (saved to config; pass "" to regenerate)
++    /// Explicit DNS hostname or IP address; no discovery or URL syntax.
+     #[arg(long)]
+-    client_id: Option<String>,
+-    #[arg(short, long, value_parser = clap::value_parser!(u8).range(0..=100))]
+-    volume: Option<u8>,
+-    /// Ignore saved volume and use default (30) or the value from --volume
++    server: String,
++    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
++    port: u16,
+     #[arg(long)]
+-    reset_volume: bool,
+-    #[arg(short, long, default_value = "20")]
+-    buffer: u64,
+-    /// Audio device buffer size in frames (0 = system default, try 4096 on Asahi Linux). Pass with no value to reset to the system default.
+-    #[arg(long, num_args = 0..=1, default_missing_value = "0")]
+-    audio_buffer: Option<u32>,
+-    /// ALSA device string for direct output, bypassing PipeWire (e.g. "plughw:0,0"). Pass with no value to reset to the default (PipeWire/cpal) host.
+-    #[cfg(target_os = "linux")]
+-    #[arg(short, long, num_args = 0..=1, default_missing_value = "")]
+-    device: Option<String>,
++    client_id: String,
++    #[arg(long)]
++    name: String,
++    /// Prepared optical hardware PCM only (e.g. hw:0,1).
++    #[arg(long)]
++    device: String,
+ }
+ 
++#[derive(Clone)]
+ struct ResolvedConfig {
+     name: String,
+     client_id: String,
+@@ -91,96 +84,41 @@ struct ResolvedConfig {
+ }
+ 
+ fn resolve_config(args: &Args) -> ResolvedConfig {
+-    let saved = config::AppConfig::load();
+-
+-    // Resolve name: non-empty CLI arg > saved config > hostname
+-    // Pass --name with no value to reset to the hostname default.
+-    let derive_hostname = || {
+-        hostname::get()
+-            .ok()
+-            .and_then(|h| h.into_string().ok())
+-            .unwrap_or_else(|| "Sendspin-RS Player".to_string())
+-    };
+-    let name = match args.name.as_deref() {
+-        Some(n) if !n.is_empty() => {
+-            config::save_name(n);
+-            n.to_string()
+-        }
+-        Some(_) => {
+-            info!("Resetting saved player name to the hostname default");
+-            config::clear_name();
+-            let hostname = derive_hostname();
+-            config::save_name(&hostname);
+-            hostname
+-        }
+-        None => saved.name.clone().unwrap_or_else(|| {
+-            let hostname = derive_hostname();
+-            config::save_name(&hostname);
+-            hostname
+-        }),
+-    };
+-
+-    // Resolve client_id: non-empty CLI arg > saved config > generate
+-    // Pass --client-id "" to regenerate
+-    let client_id = match args.client_id.as_deref() {
+-        Some(id) if !id.is_empty() => {
+-            config::save_client_id(id);
+-            id.to_string()
+-        }
+-        Some(_) => {
+-            info!("Regenerating client ID");
+-            let id = format!("sendspin-rs-{}", uuid::Uuid::new_v4());
+-            config::save_client_id(&id);
+-            id
+-        }
+-        None => saved.client_id.clone().unwrap_or_else(|| {
+-            let id = format!("sendspin-rs-{}", uuid::Uuid::new_v4());
+-            config::save_client_id(&id);
+-            id
+-        }),
+-    };
+-
+-    // Resolve volume: CLI arg > saved config > default 30
+-    let volume = if args.reset_volume {
+-        args.volume.unwrap_or(30)
+-    } else {
+-        args.volume.or(saved.player.volume).unwrap_or(30)
+-    };
+-
+-    // Resolve device: non-empty CLI arg > saved config > None (default host)
+-    // Pass --device with no value to reset to the default (PipeWire/cpal) host.
+-    #[cfg(target_os = "linux")]
+-    let device = match args.device.as_deref() {
+-        Some(d) if !d.is_empty() => {
+-            config::save_device(d);
+-            Some(d.to_string())
+-        }
+-        Some(_) => {
+-            info!("Resetting saved audio device to the default host");
+-            config::clear_device();
+-            None
+-        }
+-        None => saved.player.device,
+-    };
+-    #[cfg(not(target_os = "linux"))]
+-    let device = None;
+-
+-    // Resolve audio_buffer: CLI arg > saved config > 0 (system default)
+-    let audio_buffer = match args.audio_buffer {
+-        Some(frames) => {
+-            config::save_audio_buffer(frames);
+-            frames
+-        }
+-        None => saved.player.audio_buffer.unwrap_or(0),
+-    };
+-
+     ResolvedConfig {
+-        name,
+-        client_id,
+-        volume,
+-        device,
+-        audio_buffer,
++        name: args.name.clone(),
++        client_id: args.client_id.clone(),
++        volume: INITIAL_VOLUME,
++        device: Some(args.device.clone()),
++        audio_buffer: 0,
++    }
++}
++
++fn validate_host(host: &str) -> Result<(), String> {
++    if host.parse::<std::net::IpAddr>().is_ok() {
++        return Ok(());
+     }
++    if host.is_empty() || host.len() > 253 || !host.split('.').all(|label| {
++        !label.is_empty() && label.len() <= 63
++            && label.as_bytes()[0].is_ascii_alphanumeric()
++            && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
++            && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
++    }) {
++        return Err("server must be an explicit hostname or IP address".into());
++    }
++    Ok(())
++}
++
++pub(crate) fn validate_device(device: &str) -> Result<(), String> {
++    // Numeric card/device only: no ALSA plugins, names, subdevices, or defaults.
++    let valid = device.strip_prefix("hw:").is_some_and(|pcm| {
++        let mut parts = pcm.split(',');
++        let number = |v: Option<&str>| v.is_some_and(|v| {
++            !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit())
++                && v.parse::<u8>().is_ok()
++        });
++        number(parts.next()) && number(parts.next()) && parts.next().is_none()
++    });
++    if valid && device == "hw:0,1" { Ok(()) } else { Err("prepared optical hw:0,1 PCM required".into()) }
+ }
+ 
+ /// Mutable stream state that resets on each connection
+@@ -209,6 +147,10 @@ impl StreamState {
+     }
+ }
+ 
++fn valid_stream_format(sample_rate: u32, channels: u8, bit_depth: u8) -> bool {
++    matches!(sample_rate, 44100 | 48000) && channels == 2 && matches!(bit_depth, 16 | 24)
++}
++
+ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream: &mut StreamState) {
+     match &msg {
+         Message::StreamStart(_) => info!("← SERVER: stream/start"),
+@@ -227,8 +169,10 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+                 let channels = player_config.channels;
+                 let bit_depth = player_config.bit_depth;
+ 
+-                if codec != "pcm" || (bit_depth != 16 && bit_depth != 24) {
+-                    error!("Unsupported format: {} {}bit", codec, bit_depth);
++                if codec != "pcm" || !valid_stream_format(sample_rate, channels, bit_depth) {
++                    error!("Unsupported format: {} {}Hz {}ch {}bit", codec, sample_rate, channels, bit_depth);
++                    player.stop();
++                    stream.reset();
+                     return;
+                 }
+ 
+@@ -273,9 +217,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+                         if let Some(vol) = player_cmd.volume {
+                             info!("← Setting volume to {}", vol);
+                             player.set_volume(vol);
+-                            tokio::task::spawn_blocking(move || {
+-                                config::save_volume(vol);
+-                            });
++
+                         }
+                     }
+                     _ => {
+@@ -431,8 +373,8 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+                     bit_depth: 16,
+                 },
+             ],
+-            buffer_capacity: 1048576,
+-            supported_commands: vec!["volume".to_string(), "mute".to_string()],
++            buffer_capacity: player::QUEUE_CAPACITY_BYTES as u32,
++            supported_commands: vec!["volume".to_string()],
+         })
+         .controller()
+         .initial_player_state(PlayerState {
+@@ -453,10 +395,31 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+         .build()
+ }
+ 
++fn serial_message(message: &str) -> String {
++    message.chars().flat_map(|c| {
++        if c.is_control() || !c.is_ascii() { c.escape_default().collect::<Vec<_>>() } else { vec![c] }
++    }).collect()
++}
++
+ pub async fn run() -> Result<(), SendspinError> {
+-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
++    use std::io::Write;
++    // Escape every formatted message, including protocol/library error strings.
++    // Do not let server metadata inject serial terminal controls or forged lines.
++    env_logger::Builder::new()
++        .filter_level(log::LevelFilter::Info)
++        .format(|buf, record| {
++            let message = record.args().to_string();
++            let safe = serial_message(&message);
++            writeln!(buf, "{} {}", record.level(), safe)
++        })
++        .init();
+     let args = Args::parse();
+ 
++    validate_host(&args.server).map_err(SendspinError::Config)?;
++    validate_device(&args.device).map_err(SendspinError::Config)?;
++    if args.client_id.is_empty() || args.name.is_empty() {
++        return Err(SendspinError::Config("client identity and name must not be empty".into()));
++    }
+     let resolved = resolve_config(&args);
+ 
+     info!("Player name: {}", resolved.name);
+@@ -475,40 +438,24 @@ pub async fn run() -> Result<(), SendspinError> {
+         resolved.audio_buffer,
+         resolved.device.clone(),
+     );
+-    let buffer_ms = args.buffer;
++    let buffer_ms = LEAD_TIME_MS;
+ 
+     let mut reconnect_delay = Duration::from_secs(2);
+     let max_reconnect_delay = Duration::from_secs(30);
+ 
+     loop {
+-        // Resolve server address (re-discover via mDNS on each attempt if needed)
+-        let server_addr = match &args.server {
+-            Some(addr) => {
+-                info!("Using specified server: {}", addr);
+-                addr.clone()
+-            }
+-            None => {
+-                info!("Attempting mDNS discovery...");
+-                match mdns::discover_sendspin_server() {
+-                    Ok(addr) => addr,
+-                    Err(e) => {
+-                        warn!(
+-                            "mDNS discovery failed: {}. Retrying in {}s...",
+-                            e,
+-                            reconnect_delay.as_secs()
+-                        );
+-                        tokio::time::sleep(reconnect_delay).await;
+-                        reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
+-                        continue;
+-                    }
+-                }
+-            }
++        // Resolve the same explicit hostname on each existing reconnect attempt.
++        let host = if args.server.contains(':') {
++            format!("[{}]", args.server)
++        } else {
++            args.server.clone()
+         };
+-
+-        let ws_url = format!("ws://{}/sendspin", server_addr);
++        let ws_url = format!("ws://{}:{}/sendspin", host, args.port);
+         info!("Connecting to {}...", ws_url);
+ 
+-        let client_builder = build_client(&resolved, buffer_ms);
++        // Report live process volume on reconnect, not the startup value.
++        let live_config = ResolvedConfig { volume: player.volume(), ..resolved.clone() };
++        let client_builder = build_client(&live_config, buffer_ms);
+ 
+         // Connect to server
+         let connection = match client_builder.connect(&ws_url).await {
+@@ -559,9 +506,7 @@ pub async fn run() -> Result<(), SendspinError> {
+                 _ = tokio::signal::ctrl_c() => {
+                     info!("Received Ctrl+C, shutting down...");
+                     player.stop();
+-                    let vol = player.volume();
+-                    config::save_volume(vol);
+-                    info!("Saved volume {} to config", vol);
++
+                     std::process::exit(0);
+                 }
+                 msg = message_rx.recv() => {
+@@ -598,6 +543,63 @@ pub async fn run() -> Result<(), SendspinError> {
+ mod tests {
+     use super::*;
+ 
++    fn args() -> Args {
++        Args::try_parse_from(["sendspin", "--server", "example.test", "--port", "8927",
++            "--client-id", "fixed-id", "--name", "Optical player", "--device", "hw:0,1"]).unwrap()
++    }
++
++    #[test]
++    fn explicit_boot_identity_and_output_are_required() {
++        assert!(Args::try_parse_from(["sendspin"]).is_err());
++        assert!(Args::try_parse_from(["sendspin", "--server", "example.test"]).is_err());
++        assert_eq!(resolve_config(&args()).client_id, "fixed-id");
++        assert_eq!(resolve_config(&args()).name, "Optical player");
++    }
++
++    #[test]
++    fn every_new_process_config_starts_at_twenty_percent() {
++        let first = resolve_config(&args());
++        let player = Player::new(first.volume, 0, first.device);
++        assert_eq!(player.volume(), 20);
++        player.set_volume(83);
++        assert_eq!(player.volume(), 83);
++        // Reconnect uses this same in-memory player, not a new config.
++        assert_eq!(resolve_config(&args()).volume, 20);
++        assert_eq!(LEAD_TIME_MS, 100);
++    }
++
++    #[test]
++    fn rejects_discovery_urls_and_output_plugins() {
++        for host in ["", "ws://example.test", "host:8927", "bad/host", "bad\\nname"] {
++            assert!(validate_host(host).is_err(), "{host:?}");
++        }
++        for host in ["example.test", "192.0.2.1", "2001:db8::1"] {
++            assert!(validate_host(host).is_ok());
++        }
++        for device in ["default", "plughw:0,1", "hw:PCH,1", "hw:0,0,0", "hw:0,-1", "hw:0,256", "hw:0,0", "hw:1,1"] {
++            assert!(validate_device(device).is_err(), "{device:?}");
++        }
++        assert!(validate_device("hw:0,1").is_ok());
++    }
++
++    #[test]
++    fn remote_metadata_cannot_inject_serial_controls_or_bidi() {
++        let safe = serial_message("title\n\r\x1b[2J\u{2028}\u{202e}\u{2066}");
++        assert!(safe.is_ascii());
++        assert!(!safe.chars().any(char::is_control));
++        assert!(safe.contains("\\n"));
++        assert!(safe.contains("\\u{202e}"));
++    }
++
++    #[test]
++    fn advertised_native_formats_only() {
++        assert!(valid_stream_format(44100, 2, 16));
++        assert!(valid_stream_format(48000, 2, 24));
++        for format in [(0, 2, 16), (48000, 0, 16), (48000, 1, 16), (96000, 2, 24), (44100, 2, 32)] {
++            assert!(!valid_stream_format(format.0, format.1, format.2));
++        }
++    }
++
+     #[test]
+     fn detect_sleep_false_when_no_drift() {
+         let mut last_wall = SystemTime::now();
+diff --git a/src/mdns.rs b/src/mdns.rs
+deleted file mode 100644
+index ca4aeeb..0000000
+--- a/src/mdns.rs
++++ /dev/null
+@@ -1,128 +0,0 @@
+-// mDNS service discovery for Sendspin servers
+-
+-use log::{debug, info};
+-use mdns_sd::{ServiceDaemon, ServiceEvent};
+-use std::time::Duration;
+-
+-use crate::error::SendspinError;
+-
+-/// Discover Sendspin server via mDNS
+-/// Returns server address in format "host:port"
+-pub fn discover_sendspin_server() -> Result<String, SendspinError> {
+-    info!("Starting mDNS discovery for Sendspin server...");
+-
+-    // Create mDNS daemon
+-    let mdns = ServiceDaemon::new()?;
+-
+-    // Browse for _sendspin-server._tcp.local. services
+-    let service_type = "_sendspin-server._tcp.local.";
+-    let receiver = mdns.browse(service_type)?;
+-
+-    info!("Searching for {} services (timeout: 5s)...", service_type);
+-
+-    // Wait up to 5 seconds for a service to be discovered
+-    let timeout = Duration::from_secs(5);
+-    let start = std::time::Instant::now();
+-
+-    let result = loop {
+-        if start.elapsed() >= timeout {
+-            break Err(SendspinError::Discovery(
+-                "No Sendspin server found via mDNS after 5 seconds".into(),
+-            ));
+-        }
+-
+-        if let Ok(event) = receiver.recv_timeout(Duration::from_millis(100)) {
+-            match event {
+-                ServiceEvent::ServiceResolved(info) => {
+-                    let host = info.get_hostname();
+-                    let port = info.get_port();
+-                    let addresses = info.get_addresses();
+-
+-                    debug!(
+-                        "Found service: {} at {}:{}",
+-                        info.get_fullname(),
+-                        host,
+-                        port
+-                    );
+-                    debug!("Addresses: {:?}", addresses);
+-
+-                    // Prefer IPv4 address
+-                    if let Some(addr) = addresses.iter().find(|a| a.is_ipv4()) {
+-                        let server = format!("{}:{}", addr, port);
+-                        info!("Discovered Sendspin server: {}", server);
+-                        break Ok(server);
+-                    }
+-
+-                    // Fallback to any address
+-                    if let Some(addr) = addresses.iter().next() {
+-                        let server = format!("{}:{}", addr, port);
+-                        info!("Discovered Sendspin server: {}", server);
+-                        break Ok(server);
+-                    }
+-                }
+-                ServiceEvent::ServiceFound(type_name, fullname) => {
+-                    debug!("Service found: {} ({})", fullname, type_name);
+-                }
+-                ServiceEvent::SearchStarted(service_type) => {
+-                    debug!("Search started for: {}", service_type);
+-                }
+-                ServiceEvent::SearchStopped(service_type) => {
+-                    debug!("Search stopped for: {}", service_type);
+-                }
+-                _ => {}
+-            }
+-        }
+-    };
+-
+-    // Stop the browse operation
+-    mdns.stop_browse(service_type).ok();
+-
+-    // Drain any remaining messages from the channel, including SearchStopped
+-    while receiver.recv_timeout(Duration::from_millis(10)).is_ok() {}
+-
+-    // Shutdown and consume the final response to prevent error message
+-    if mdns.shutdown().is_ok() {
+-        // Try to receive the shutdown acknowledgment to prevent "closed channel" error
+-        receiver.recv_timeout(Duration::from_millis(50)).ok();
+-    }
+-    result
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn test_mdns_discovery_timeout_or_success() {
+-        // This test verifies mDNS discovery works
+-        // It may find a server (Ok) or timeout (Err) depending on network
+-        let start = std::time::Instant::now();
+-        let result = discover_sendspin_server();
+-        let elapsed = start.elapsed();
+-
+-        match result {
+-            Ok(server) => {
+-                // Found a server - verify format
+-                assert!(server.contains(':'), "Server address should contain port");
+-                // Should complete quickly if server found
+-                assert!(elapsed < Duration::from_secs(6));
+-            }
+-            Err(e) => {
+-                // No server found - verify timeout behavior
+-                assert!(elapsed >= Duration::from_secs(5));
+-                assert!(elapsed < Duration::from_secs(6));
+-                assert!(e.to_string().contains("No Sendspin server found"));
+-            }
+-        }
+-    }
+-
+-    #[test]
+-    fn test_service_type_constant() {
+-        // Verify the service type format is correct
+-        let service_type = "_sendspin-server._tcp.local.";
+-
+-        assert!(service_type.starts_with("_sendspin-server"));
+-        assert!(service_type.contains("._tcp."));
+-        assert!(service_type.ends_with(".local."));
+-    }
+-}
+diff --git a/src/player.rs b/src/player.rs
+index ec4d955..eb3d6c6 100644
+--- a/src/player.rs
++++ b/src/player.rs
+@@ -1,3 +1,4 @@
++// Modified for macbook-sendspin: ALSA-only stateless appliance.
+ // Audio Player Module
+ //
+ // Handles all audio playback logic:
+@@ -17,6 +18,30 @@ use std::sync::atomic::{AtomicU8, Ordering};
+ use std::sync::{Arc, Condvar, Mutex, mpsc};
+ use std::time::{Duration, Instant};
+ 
++pub(crate) const QUEUE_CAPACITY_BYTES: usize = 1_048_576;
++const MAX_QUEUED_BUFFERS: usize = 256;
++
++// Admission applies equally to incoming chunks and future-buffer requeues.
++// Fail closed rather than allowing a sustained future stream to exhaust RAM.
++fn queue_buffer(
++    queue: &mut VecDeque<QueuedBuffer>,
++    buffer: QueuedBuffer,
++    front: bool,
++) -> Result<(), SendspinError> {
++    if buffer.samples.is_empty() {
++        return Ok(());
++    }
++    let samples = queue.iter().try_fold(buffer.samples.len(), |total, item| {
++        total.checked_add(item.samples.len())
++    });
++    let bytes = samples.and_then(|samples| samples.checked_mul(std::mem::size_of::<Sample>()));
++    if queue.len() >= MAX_QUEUED_BUFFERS || bytes.is_none_or(|bytes| bytes > QUEUE_CAPACITY_BYTES) {
++        return Err(SendspinError::Audio("audio queue capacity exceeded".into()));
++    }
++    if front { queue.push_front(buffer); } else { queue.push_back(buffer); }
++    Ok(())
++}
++
+ /// Player control commands
+ #[derive(Debug, Clone)]
+ pub enum PlaybackControl {
+@@ -68,6 +93,9 @@ impl Player {
+                 device,
+             ) {
+                 error!("Playback thread error: {}", e);
++                // Never remain connected with a dead output worker. Native init
++                // supervision may restart us; no fallback output is available.
++                std::process::exit(1);
+             }
+         });
+ 
+@@ -81,7 +109,11 @@ impl Player {
+ 
+     /// Add an audio buffer to the playback queue
+     pub fn enqueue(&self, buffer: QueuedBuffer) {
+-        self.audio_queue.lock().unwrap().push_back(buffer);
++        let result = queue_buffer(&mut self.audio_queue.lock().unwrap(), buffer, false);
++        if let Err(error) = result {
++            error!("Playback admission error: {}", error);
++            std::process::exit(1);
++        }
+         self.queue_condvar.notify_one();
+     }
+ 
+@@ -172,7 +204,7 @@ impl Player {
+                         std::thread::sleep(wait);
+                     } else {
+                         // Too far in future, put back and wait
+-                        queue.lock().unwrap().push_front(buffer);
++                        queue_buffer(&mut queue.lock().unwrap(), buffer, true)?;
+                         std::thread::sleep(Duration::from_millis(1));
+                         continue;
+                     }
+@@ -214,6 +246,7 @@ impl Player {
+                     && let Err(e) = out.write(&samples)
+                 {
+                     error!("Output error: {}", e);
++                    return Err(e);
+                 }
+             }
+         }
+@@ -226,6 +259,53 @@ mod tests {
+     use sendspin::audio::Codec;
+     use std::time::Instant;
+ 
++    fn queued(samples: usize) -> QueuedBuffer {
++        QueuedBuffer {
++            play_at: Instant::now() + Duration::from_secs(60),
++            samples: Arc::from(vec![0; samples].into_boxed_slice()),
++            format: AudioFormat { codec: Codec::Pcm, sample_rate: 48000, channels: 2,
++                bit_depth: 24, codec_header: None },
++        }
++    }
++
++    #[test]
++    fn future_audio_is_bounded_by_advertised_payload_bytes() {
++        let mut queue = VecDeque::new();
++        queue_buffer(&mut queue, queued(QUEUE_CAPACITY_BYTES / 4), false).unwrap();
++        assert!(queue_buffer(&mut queue, queued(1), false).is_err());
++        assert_eq!(queue.len(), 1);
++        queue.clear();
++        assert!(queue_buffer(&mut queue, queued(QUEUE_CAPACITY_BYTES / 4 + 1), false).is_err());
++        assert!(queue.is_empty());
++    }
++
++    #[test]
++    fn tiny_and_empty_chunks_cannot_create_unbounded_queue_entries() {
++        let mut queue = VecDeque::new();
++        queue_buffer(&mut queue, queued(0), false).unwrap();
++        assert!(queue.is_empty());
++        for _ in 0..MAX_QUEUED_BUFFERS {
++            queue_buffer(&mut queue, queued(1), false).unwrap();
++        }
++        assert!(queue_buffer(&mut queue, queued(1), false).is_err());
++        assert!(queue_buffer(&mut queue, queued(1), true).is_err());
++        assert_eq!(queue.len(), MAX_QUEUED_BUFFERS);
++    }
++
++    #[test]
++    fn future_requeue_preserves_timestamp_and_fifo_order() {
++        let mut queue = VecDeque::new();
++        let future = queued(2);
++        let timestamp = future.play_at;
++        queue_buffer(&mut queue, future, false).unwrap();
++        let future = queue.pop_front().unwrap();
++        queue_buffer(&mut queue, queued(4), false).unwrap();
++        queue_buffer(&mut queue, future, true).unwrap();
++        assert_eq!(queue.front().unwrap().play_at, timestamp);
++        assert_eq!(queue.pop_front().unwrap().samples.len(), 2);
++        assert_eq!(queue.pop_front().unwrap().samples.len(), 4);
++    }
++
+     #[test]
+     fn test_player_creation() {
+         let player = Player::new(75, 0, None);

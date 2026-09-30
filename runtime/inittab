@@ -1,0 +1,5 @@
+::sysinit:/bin/rc.init
+::respawn:/sbin/udhcpc -f -i eth0 -s /etc/udhcpc/sendspin.script
+::respawn:/usr/bin/sendspin-appliance --launch
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/rc.shutdown
