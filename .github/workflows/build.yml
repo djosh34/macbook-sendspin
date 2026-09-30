@@ -1,0 +1,75 @@
+name: x86_64 appliance
+
+# SECURITY BOUNDARY (not the PR-editable job condition): repository Actions must
+# require all_external_contributors approval. Keep djosh34 the sole write/admin
+# actor; NEVER approve external PR workflow runs. Reverify before relaxing access.
+# Dispatch only after the local ARM64 make check/build path has been verified.
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appliance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Defense in depth only: external PRs must be blocked by repository approval.
+    if: >-
+      github.repository == 'djosh34/macbook-sendspin' &&
+      github.actor == 'djosh34' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.user.login == 'djosh34' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        !github.event.pull_request.draft))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_DATE_EPOCH: '1748736000'
+      BUILD_JOBS: '2'
+    steps:
+      - name: Checkout authorized source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Verify native host prerequisites
+        run: |
+          test "$(uname -m)" = x86_64
+          command -v podman
+          command -v make
+          podman --version
+          make --version
+
+      - name: Check
+        run: make check
+
+      - name: Build
+        run: make build
+
+      - name: Retain direct-boot artifacts briefly
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: appliance-x86_64-${{ github.sha }}
+          path: |
+            out/kernel
+            out/initrd.img
+            out/boot-image.oci.tar
+            out/licenses/
+            out/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Clean invocation outputs
+        if: always()
+        run: make clean
