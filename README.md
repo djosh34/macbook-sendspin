@@ -24,7 +24,8 @@ The tiny `.tmp/lock` is retained for locking.
 The OCI boot image contains `/kernel` and `/initrd.img`, owned by UID/GID 107.
 CI publishes this image for every push to `master`, as
 `ghcr.io/djosh34/macbook-sendspin:<commit>`. The job summary shows its digest;
-deploy it by digest. Pull requests only build.
+deploy it by digest. Pull requests only build. Nodes pull it anonymously, so
+the package must be public.
 
 ## KubeVirt example
 
