@@ -973,13 +973,14 @@ index 7c76415..cd64142 100644
                          }
                      }
                      _ => {
-@@ -431,13 +374,11 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+@@ -431,13 +374,12 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
                      bit_depth: 16,
                  },
              ],
 -            buffer_capacity: 1048576,
 -            supported_commands: vec!["volume".to_string(), "mute".to_string()],
-+            buffer_capacity: player::QUEUE_CAPACITY_BYTES as u32,
++            // Sendspin capacity counts encoded PCM bytes, not decoded i32 samples.
++            buffer_capacity: 1_048_576,
 +            supported_commands: vec!["volume".to_string()],
          })
          .controller()
@@ -989,7 +990,7 @@ index 7c76415..cd64142 100644
              // We don't compensate for external speaker/amplifier latency.
              static_delay_ms: Some(0),
              // `buffer_ms` (--buffer) is the lead time this client waits before
-@@ -449,14 +390,36 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+@@ -449,14 +391,36 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
              // We don't implement PlayerCommandType::SetStaticDelay yet, so
              // don't advertise support for it.
              supported_commands: None,
@@ -1027,7 +1028,7 @@ index 7c76415..cd64142 100644
      let resolved = resolve_config(&args);
  
      info!("Player name: {}", resolved.name);
-@@ -475,40 +438,24 @@ pub async fn run() -> Result<(), SendspinError> {
+@@ -475,40 +439,24 @@ pub async fn run() -> Result<(), SendspinError> {
          resolved.audio_buffer,
          resolved.device.clone(),
      );
@@ -1078,7 +1079,7 @@ index 7c76415..cd64142 100644
  
          // Connect to server
          let connection = match client_builder.connect(&ws_url).await {
-@@ -559,9 +506,7 @@ pub async fn run() -> Result<(), SendspinError> {
+@@ -559,9 +507,7 @@ pub async fn run() -> Result<(), SendspinError> {
                  _ = tokio::signal::ctrl_c() => {
                      info!("Received Ctrl+C, shutting down...");
                      player.stop();
@@ -1089,7 +1090,7 @@ index 7c76415..cd64142 100644
                      std::process::exit(0);
                  }
                  msg = message_rx.recv() => {
-@@ -598,6 +543,111 @@ pub async fn run() -> Result<(), SendspinError> {
+@@ -598,6 +544,112 @@ pub async fn run() -> Result<(), SendspinError> {
  mod tests {
      use super::*;
  
@@ -1112,6 +1113,7 @@ index 7c76415..cd64142 100644
 +            let hello = ws.next().await.unwrap().unwrap();
 +            let hello: Value = serde_json::from_str(hello.to_text().unwrap()).unwrap();
 +            assert_eq!(hello["payload"]["player@v1_support"]["supported_commands"], json!(["volume"]));
++            assert_eq!(hello["payload"]["player@v1_support"]["buffer_capacity"], json!(1_048_576));
 +            ws.send(WsMessage::Text(json!({
 +                "type": "server/hello",
 +                "payload": {"server_id": "test-server", "name": "Test server", "version": 1,
@@ -1348,8 +1350,8 @@ index ec4d955..eb3d6c6 100644
  use std::sync::{Arc, Condvar, Mutex, mpsc};
  use std::time::{Duration, Instant};
  
-+pub(crate) const QUEUE_CAPACITY_BYTES: usize = 1_048_576;
-+const MAX_QUEUED_BUFFERS: usize = 256;
++// Separate from the 1 MiB encoded capacity advertised to the server.
++const MAX_DECODED_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 +
 +// Admission applies equally to incoming chunks and future-buffer requeues.
 +// Fail closed rather than allowing a sustained future stream to exhaust RAM.
@@ -1365,7 +1367,7 @@ index ec4d955..eb3d6c6 100644
 +        total.checked_add(item.samples.len())
 +    });
 +    let bytes = samples.and_then(|samples| samples.checked_mul(std::mem::size_of::<Sample>()));
-+    if queue.len() >= MAX_QUEUED_BUFFERS || bytes.is_none_or(|bytes| bytes > QUEUE_CAPACITY_BYTES) {
++    if bytes.is_none_or(|bytes| bytes > MAX_DECODED_QUEUE_BYTES) {
 +        return Err(SendspinError::Audio("audio queue capacity exceeded".into()));
 +    }
 +    if front { queue.push_front(buffer); } else { queue.push_back(buffer); }
@@ -1415,7 +1417,7 @@ index ec4d955..eb3d6c6 100644
                  }
              }
          }
-@@ -226,6 +259,53 @@ mod tests {
+@@ -226,6 +259,66 @@ mod tests {
      use sendspin::audio::Codec;
      use std::time::Instant;
  
@@ -1429,27 +1431,40 @@ index ec4d955..eb3d6c6 100644
 +    }
 +
 +    #[test]
-+    fn future_audio_is_bounded_by_advertised_payload_bytes() {
++    fn future_audio_is_bounded_by_decoded_memory_bytes() {
 +        let mut queue = VecDeque::new();
-+        queue_buffer(&mut queue, queued(QUEUE_CAPACITY_BYTES / 4), false).unwrap();
++        let max_samples = 4 * 1024 * 1024 / std::mem::size_of::<Sample>();
++        queue_buffer(&mut queue, queued(max_samples), false).unwrap();
 +        assert!(queue_buffer(&mut queue, queued(1), false).is_err());
++        assert!(queue_buffer(&mut queue, queued(1), true).is_err());
 +        assert_eq!(queue.len(), 1);
 +        queue.clear();
-+        assert!(queue_buffer(&mut queue, queued(QUEUE_CAPACITY_BYTES / 4 + 1), false).is_err());
++        assert!(queue_buffer(&mut queue, queued(max_samples + 1), false).is_err());
 +        assert!(queue.is_empty());
 +    }
 +
 +    #[test]
-+    fn tiny_and_empty_chunks_cannot_create_unbounded_queue_entries() {
-+        let mut queue = VecDeque::new();
-+        queue_buffer(&mut queue, queued(0), false).unwrap();
-+        assert!(queue.is_empty());
-+        for _ in 0..MAX_QUEUED_BUFFERS {
-+            queue_buffer(&mut queue, queued(1), false).unwrap();
++    fn advertised_pcm_burst_accepts_decoded_expansion_and_more_than_256_chunks() {
++        for bit_depth in [16, 24] {
++            let mut queue = VecDeque::new();
++            queue_buffer(&mut queue, queued(0), false).unwrap();
++            assert!(queue.is_empty());
++            let samples_per_chunk = 512;
++            let wire_bytes_per_chunk = samples_per_chunk * (bit_depth as usize / 8);
++            let chunks = 1_048_576 / wire_bytes_per_chunk;
++            assert!(chunks > 256);
++            assert!(chunks * samples_per_chunk * std::mem::size_of::<Sample>() > 1_048_576);
++            for _ in 0..chunks {
++                let mut buffer = queued(samples_per_chunk);
++                buffer.format.bit_depth = bit_depth;
++                queue_buffer(&mut queue, buffer, false).unwrap();
++            }
++            let future = queue.pop_front().unwrap();
++            let timestamp = future.play_at;
++            queue_buffer(&mut queue, future, true).unwrap();
++            assert_eq!(queue.len(), chunks);
++            assert_eq!(queue.front().unwrap().play_at, timestamp);
 +        }
-+        assert!(queue_buffer(&mut queue, queued(1), false).is_err());
-+        assert!(queue_buffer(&mut queue, queued(1), true).is_err());
-+        assert_eq!(queue.len(), MAX_QUEUED_BUFFERS);
 +    }
 +
 +    #[test]
