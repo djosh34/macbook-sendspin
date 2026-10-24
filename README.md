@@ -22,7 +22,9 @@ If Podman's private-network DNS fails locally, use `make build BUILD_NETWORK=hos
 Temporary work has exit-trap cleanup; use `make clean` for interrupted leftovers.
 The tiny `.tmp/lock` is retained for locking.
 The OCI boot image contains `/kernel` and `/initrd.img`, owned by UID/GID 107.
-There are no publication or deployment targets.
+CI publishes this image for every push to `master`, as
+`ghcr.io/djosh34/macbook-sendspin:<commit>`. The job summary shows its digest;
+deploy it by digest. Pull requests only build.
 
 ## KubeVirt example
 

@@ -3,11 +3,14 @@ name: x86_64 appliance
 # SECURITY BOUNDARY (not the PR-editable job condition): repository Actions must
 # require all_external_contributors approval. Keep djosh34 the sole write/admin
 # actor; NEVER approve external PR workflow runs. Reverify before relaxing access.
-# Dispatch only after the local ARM64 make check/build path has been verified.
+# Pull requests only build. Pushes to master and manual dispatch on master also
+# publish the boot image to GHCR.
 on:
   pull_request:
     branches: [master]
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -23,7 +26,8 @@ jobs:
     if: >-
       github.repository == 'djosh34/macbook-sendspin' &&
       github.actor == 'djosh34' &&
-      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') ||
+      (((github.event_name == 'workflow_dispatch' || github.event_name == 'push') &&
+        github.ref == 'refs/heads/master') ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.user.login == 'djosh34' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
@@ -77,3 +81,32 @@ jobs:
       - name: Clean invocation outputs
         if: always()
         run: make clean
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Fetch the built artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: appliance-x86_64-${{ github.sha }}
+
+      - name: Push the boot image to GHCR
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          skopeo copy --preserve-digests --digestfile digest \
+            oci-archive:boot-image.oci.tar "docker://$IMAGE:$GITHUB_SHA"
+          printf '%s\n' "Published $IMAGE@$(cat digest)" | tee -a "$GITHUB_STEP_SUMMARY"
