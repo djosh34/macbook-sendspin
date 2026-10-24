@@ -1,8 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 4e947d5..c77cf7c 100644
+index 4e947d5..2670f4c 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -1,34 +1,21 @@
+@@ -1,34 +1,26 @@
 +# Modified for macbook-sendspin: ALSA-only stateless appliance.
  [package]
  name = "sendspin-rs-cli"
@@ -37,6 +37,11 @@ index 4e947d5..c77cf7c 100644
 -# build. Revisit once cpal bumps its own alsa dependency.
  alsa = "0.11"
 +dasp_sample = "0.11"
++
++[dev-dependencies]
++futures-util = "0.3"
++serde_json = "1.0"
++tokio-tungstenite = "0.29"
  
 -[target.'cfg(not(target_os = "linux"))'.dependencies]
 -cpal = "0.18"
@@ -683,7 +688,7 @@ index 5ae484c..a006cc5 100644
      Alsa(#[from] alsa::Error),
  }
 diff --git a/src/lib.rs b/src/lib.rs
-index 7c76415..1d573bd 100644
+index 7c76415..cd64142 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -1,3 +1,4 @@
@@ -701,7 +706,35 @@ index 7c76415..1d573bd 100644
  pub mod player;
  
  use clap::Parser;
-@@ -53,35 +52,29 @@ async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
+@@ -32,7 +31,7 @@ use std::time::{Duration, Instant, SystemTime};
+ 
+ use crate::error::SendspinError;
+ 
+-// Routine player-state pushes (volume/mute changes, stream lifecycle events).
++// Routine player-state pushes (volume changes, stream lifecycle events).
+ // `state` is intentionally left `None` here: the top-level ClientState.state
+ // field is reserved for genuine sync-state transitions (see
+ // WsSender::send_sync_state/exit_external_source in the sendspin crate) — the
+@@ -41,47 +40,42 @@ use crate::error::SendspinError;
+ // initial_sync_state/initial_player_state (see build_client). Setting `state`
+ // again on every routine update is what the server flags as "legacy top-level
+ // 'state' field" usage.
+-async fn send_player_state(ws_tx: &WsSender, volume: u8, muted: bool) {
++fn volume_player_state(volume: u8) -> PlayerState {
++    // Only advertise volume, so muted must be None (omitted on the wire).
++    PlayerState { volume: Some(volume), ..Default::default() }
++}
++
++async fn send_player_state(ws_tx: &WsSender, volume: u8) {
+     let state = Message::ClientState(ClientState {
+         state: None,
+-        player: Some(PlayerState {
+-            volume: Some(volume),
+-            muted: Some(muted),
+-            ..Default::default()
+-        }),
++        player: Some(volume_player_state(volume)),
+     });
      let _ = ws_tx.send_message(state).await;
  }
  
@@ -752,7 +785,7 @@ index 7c76415..1d573bd 100644
  struct ResolvedConfig {
      name: String,
      client_id: String,
-@@ -91,96 +84,41 @@ struct ResolvedConfig {
+@@ -91,96 +85,41 @@ struct ResolvedConfig {
  }
  
  fn resolve_config(args: &Args) -> ResolvedConfig {
@@ -856,7 +889,7 @@ index 7c76415..1d573bd 100644
 +fn validate_host(host: &str) -> Result<(), String> {
 +    if host.parse::<std::net::IpAddr>().is_ok() {
 +        return Ok(());
-     }
++    }
 +    if host.is_empty() || host.len() > 253 || !host.split('.').all(|label| {
 +        !label.is_empty() && label.len() <= 63
 +            && label.as_bytes()[0].is_ascii_alphanumeric()
@@ -864,7 +897,7 @@ index 7c76415..1d573bd 100644
 +            && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
 +    }) {
 +        return Err("server must be an explicit hostname or IP address".into());
-+    }
+     }
 +    Ok(())
 +}
 +
@@ -882,7 +915,7 @@ index 7c76415..1d573bd 100644
  }
  
  /// Mutable stream state that resets on each connection
-@@ -209,6 +147,10 @@ impl StreamState {
+@@ -209,6 +148,10 @@ impl StreamState {
      }
  }
  
@@ -893,7 +926,7 @@ index 7c76415..1d573bd 100644
  async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream: &mut StreamState) {
      match &msg {
          Message::StreamStart(_) => info!("← SERVER: stream/start"),
-@@ -227,8 +169,10 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+@@ -227,8 +170,10 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
                  let channels = player_config.channels;
                  let bit_depth = player_config.bit_depth;
  
@@ -906,7 +939,30 @@ index 7c76415..1d573bd 100644
                      return;
                  }
  
-@@ -273,9 +217,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+@@ -249,19 +194,19 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
+                 stream.next_play_time = None;
+ 
+                 info!("Stream: {}Hz {}ch {}bit", sample_rate, channels, bit_depth);
+-                send_player_state(ws_tx, player.volume(), false).await;
++                send_player_state(ws_tx, player.volume()).await;
+             }
+         }
+         Message::StreamEnd(_) => {
+             info!("← stream/end");
+             player.stop();
+             stream.next_play_time = None;
+-            send_player_state(ws_tx, player.volume(), false).await;
++            send_player_state(ws_tx, player.volume()).await;
+         }
+         Message::StreamClear(_) => {
+             player.stop();
+             stream.reset();
+-            send_player_state(ws_tx, player.volume(), false).await;
++            send_player_state(ws_tx, player.volume()).await;
+         }
+         Message::ServerCommand(command) => {
+             if let Some(player_cmd) = &command.player {
+@@ -273,9 +218,7 @@ async fn handle_message(msg: Message, player: &Player, ws_tx: &WsSender, stream:
                          if let Some(vol) = player_cmd.volume {
                              info!("← Setting volume to {}", vol);
                              player.set_volume(vol);
@@ -917,18 +973,29 @@ index 7c76415..1d573bd 100644
                          }
                      }
                      _ => {
-@@ -431,8 +373,8 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+@@ -431,13 +374,12 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
                      bit_depth: 16,
                  },
              ],
 -            buffer_capacity: 1048576,
 -            supported_commands: vec!["volume".to_string(), "mute".to_string()],
-+            buffer_capacity: player::QUEUE_CAPACITY_BYTES as u32,
++            // Sendspin capacity counts encoded PCM bytes, not decoded i32 samples.
++            buffer_capacity: 1_048_576,
 +            supported_commands: vec!["volume".to_string()],
          })
          .controller()
          .initial_player_state(PlayerState {
-@@ -453,10 +395,31 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+-            volume: Some(config.volume),
+-            muted: Some(false),
+             // We don't compensate for external speaker/amplifier latency.
+             static_delay_ms: Some(0),
+             // `buffer_ms` (--buffer) is the lead time this client waits before
+@@ -449,14 +391,36 @@ fn build_client(config: &ResolvedConfig, buffer_ms: u64) -> ProtocolClientBuilde
+             // We don't implement PlayerCommandType::SetStaticDelay yet, so
+             // don't advertise support for it.
+             supported_commands: None,
++            ..volume_player_state(config.volume)
+         })
          .build()
  }
  
@@ -961,7 +1028,7 @@ index 7c76415..1d573bd 100644
      let resolved = resolve_config(&args);
  
      info!("Player name: {}", resolved.name);
-@@ -475,40 +438,24 @@ pub async fn run() -> Result<(), SendspinError> {
+@@ -475,40 +439,24 @@ pub async fn run() -> Result<(), SendspinError> {
          resolved.audio_buffer,
          resolved.device.clone(),
      );
@@ -1012,7 +1079,7 @@ index 7c76415..1d573bd 100644
  
          // Connect to server
          let connection = match client_builder.connect(&ws_url).await {
-@@ -559,9 +506,7 @@ pub async fn run() -> Result<(), SendspinError> {
+@@ -559,9 +507,7 @@ pub async fn run() -> Result<(), SendspinError> {
                  _ = tokio::signal::ctrl_c() => {
                      info!("Received Ctrl+C, shutting down...");
                      player.stop();
@@ -1023,13 +1090,62 @@ index 7c76415..1d573bd 100644
                      std::process::exit(0);
                  }
                  msg = message_rx.recv() => {
-@@ -598,6 +543,63 @@ pub async fn run() -> Result<(), SendspinError> {
+@@ -598,6 +544,112 @@ pub async fn run() -> Result<(), SendspinError> {
  mod tests {
      use super::*;
  
 +    fn args() -> Args {
 +        Args::try_parse_from(["sendspin", "--server", "example.test", "--port", "8927",
 +            "--client-id", "fixed-id", "--name", "Optical player", "--device", "hw:0,1"]).unwrap()
++    }
++
++    #[tokio::test]
++    async fn volume_only_state_omits_muted_on_handshake_and_routine_updates() {
++        use futures_util::{SinkExt, StreamExt};
++        use serde_json::{Value, json};
++        use tokio_tungstenite::tungstenite::Message as WsMessage;
++
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let address = listener.local_addr().unwrap();
++        let server = tokio::spawn(async move {
++            let (socket, _) = listener.accept().await.unwrap();
++            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
++            let hello = ws.next().await.unwrap().unwrap();
++            let hello: Value = serde_json::from_str(hello.to_text().unwrap()).unwrap();
++            assert_eq!(hello["payload"]["player@v1_support"]["supported_commands"], json!(["volume"]));
++            assert_eq!(hello["payload"]["player@v1_support"]["buffer_capacity"], json!(1_048_576));
++            ws.send(WsMessage::Text(json!({
++                "type": "server/hello",
++                "payload": {"server_id": "test-server", "name": "Test server", "version": 1,
++                    "active_roles": ["player@v1"], "connection_reason": "playback"}
++            }).to_string().into())).await.unwrap();
++            let mut states = Vec::new();
++            while states.len() < 2 {
++                let frame = ws.next().await.unwrap().unwrap();
++                if let WsMessage::Text(text) = frame {
++                    let message: Value = serde_json::from_str(&text).unwrap();
++                    if message["type"] == "client/state" {
++                        states.push(message);
++                    }
++                }
++            }
++            states
++        });
++
++        let observation = async {
++            let connection = build_client(&resolve_config(&args()), LEAD_TIME_MS)
++                .connect(&format!("ws://{address}/sendspin")).await.unwrap().split();
++            send_player_state(&connection.sender, 73).await;
++            server.await.unwrap()
++        };
++        let states = tokio::time::timeout(Duration::from_secs(5), observation).await.unwrap();
++        assert_eq!(states[0]["payload"]["player"]["volume"], json!(20));
++        assert_eq!(states[0]["payload"]["player"]["required_lead_time_ms"], json!(100));
++        assert_eq!(states[0]["payload"]["player"]["min_buffer_ms"], json!(100));
++        assert_eq!(states[1]["payload"]["player"]["volume"], json!(73));
++        assert!(states[1]["payload"].get("state").is_none());
++        let mute_fields: Vec<_> = states.iter().map(|state| state["payload"]["player"].get("muted")).collect();
++        assert_eq!(mute_fields, vec![None, None], "volume-only client must omit muted, not emit false or null");
 +    }
 +
 +    #[test]
@@ -1234,8 +1350,8 @@ index ec4d955..eb3d6c6 100644
  use std::sync::{Arc, Condvar, Mutex, mpsc};
  use std::time::{Duration, Instant};
  
-+pub(crate) const QUEUE_CAPACITY_BYTES: usize = 1_048_576;
-+const MAX_QUEUED_BUFFERS: usize = 256;
++// Separate from the 1 MiB encoded capacity advertised to the server.
++const MAX_DECODED_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 +
 +// Admission applies equally to incoming chunks and future-buffer requeues.
 +// Fail closed rather than allowing a sustained future stream to exhaust RAM.
@@ -1251,7 +1367,7 @@ index ec4d955..eb3d6c6 100644
 +        total.checked_add(item.samples.len())
 +    });
 +    let bytes = samples.and_then(|samples| samples.checked_mul(std::mem::size_of::<Sample>()));
-+    if queue.len() >= MAX_QUEUED_BUFFERS || bytes.is_none_or(|bytes| bytes > QUEUE_CAPACITY_BYTES) {
++    if bytes.is_none_or(|bytes| bytes > MAX_DECODED_QUEUE_BYTES) {
 +        return Err(SendspinError::Audio("audio queue capacity exceeded".into()));
 +    }
 +    if front { queue.push_front(buffer); } else { queue.push_back(buffer); }
@@ -1301,7 +1417,7 @@ index ec4d955..eb3d6c6 100644
                  }
              }
          }
-@@ -226,6 +259,53 @@ mod tests {
+@@ -226,6 +259,66 @@ mod tests {
      use sendspin::audio::Codec;
      use std::time::Instant;
  
@@ -1315,27 +1431,40 @@ index ec4d955..eb3d6c6 100644
 +    }
 +
 +    #[test]
-+    fn future_audio_is_bounded_by_advertised_payload_bytes() {
++    fn future_audio_is_bounded_by_decoded_memory_bytes() {
 +        let mut queue = VecDeque::new();
-+        queue_buffer(&mut queue, queued(QUEUE_CAPACITY_BYTES / 4), false).unwrap();
++        let max_samples = 4 * 1024 * 1024 / std::mem::size_of::<Sample>();
++        queue_buffer(&mut queue, queued(max_samples), false).unwrap();
 +        assert!(queue_buffer(&mut queue, queued(1), false).is_err());
++        assert!(queue_buffer(&mut queue, queued(1), true).is_err());
 +        assert_eq!(queue.len(), 1);
 +        queue.clear();
-+        assert!(queue_buffer(&mut queue, queued(QUEUE_CAPACITY_BYTES / 4 + 1), false).is_err());
++        assert!(queue_buffer(&mut queue, queued(max_samples + 1), false).is_err());
 +        assert!(queue.is_empty());
 +    }
 +
 +    #[test]
-+    fn tiny_and_empty_chunks_cannot_create_unbounded_queue_entries() {
-+        let mut queue = VecDeque::new();
-+        queue_buffer(&mut queue, queued(0), false).unwrap();
-+        assert!(queue.is_empty());
-+        for _ in 0..MAX_QUEUED_BUFFERS {
-+            queue_buffer(&mut queue, queued(1), false).unwrap();
++    fn advertised_pcm_burst_accepts_decoded_expansion_and_more_than_256_chunks() {
++        for bit_depth in [16, 24] {
++            let mut queue = VecDeque::new();
++            queue_buffer(&mut queue, queued(0), false).unwrap();
++            assert!(queue.is_empty());
++            let samples_per_chunk = 512;
++            let wire_bytes_per_chunk = samples_per_chunk * (bit_depth as usize / 8);
++            let chunks = 1_048_576 / wire_bytes_per_chunk;
++            assert!(chunks > 256);
++            assert!(chunks * samples_per_chunk * std::mem::size_of::<Sample>() > 1_048_576);
++            for _ in 0..chunks {
++                let mut buffer = queued(samples_per_chunk);
++                buffer.format.bit_depth = bit_depth;
++                queue_buffer(&mut queue, buffer, false).unwrap();
++            }
++            let future = queue.pop_front().unwrap();
++            let timestamp = future.play_at;
++            queue_buffer(&mut queue, future, true).unwrap();
++            assert_eq!(queue.len(), chunks);
++            assert_eq!(queue.front().unwrap().play_at, timestamp);
 +        }
-+        assert!(queue_buffer(&mut queue, queued(1), false).is_err());
-+        assert!(queue_buffer(&mut queue, queued(1), true).is_err());
-+        assert_eq!(queue.len(), MAX_QUEUED_BUFFERS);
 +    }
 +
 +    #[test]
